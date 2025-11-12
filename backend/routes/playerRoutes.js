@@ -59,7 +59,7 @@ router.get('/:id/compare', async (req, res) => {
     const playerId = req.params.id;
     console.log(`Fetching compare data for player ID: ${playerId}`);
     
-    // Fetch stats and prediction in parallel
+    // OPTIMIZATION: Fetch stats and prediction in parallel
     const [statsResult, predictionResult] = await Promise.allSettled([
       getPlayerStats(playerId),
       predictPoints(playerId)
@@ -85,15 +85,18 @@ router.get('/:id/compare', async (req, res) => {
       playerName = prediction.player;
     }
     
-    // If still no name, try to get it from balldontlie API directly
+    // If still no name, try to get it from balldontlie API directly (with timeout)
     if (!playerName) {
       try {
         const axios = (await import('axios')).default;
         const BALLDONTLIE_API_KEY = process.env.BALLDONTLIE_API_KEY;
-        const response = await axios.get(`https://api.balldontlie.io/v1/players/${playerId}`, {
-          headers: BALLDONTLIE_API_KEY ? { Authorization: BALLDONTLIE_API_KEY } : {},
-          timeout: 5000
-        });
+        const response = await Promise.race([
+          axios.get(`https://api.balldontlie.io/v1/players/${playerId}`, {
+            headers: BALLDONTLIE_API_KEY ? { Authorization: BALLDONTLIE_API_KEY } : {},
+            timeout: 3000 // Reduced timeout
+          }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 3000))
+        ]);
         if (response.data && response.data.data) {
           const player = response.data.data;
           playerName = `${player.first_name || ''} ${player.last_name || ''}`.trim();
@@ -111,17 +114,114 @@ router.get('/:id/compare', async (req, res) => {
     
     console.log(`📝 Using player name: ${playerName}`);
     
-    // Fetch odds from API - MUST use API, no fallback estimation
-    let odds = null;
-    try {
-      odds = await getPlayerOdds(playerId, playerName);
-      if (!odds || !odds.line) {
-        throw new Error('API returned no line for player');
-      }
-      console.log(`✅ Got odds from API: ${odds.line} for ${playerName}`);
-    } catch (oddsError) {
-      console.error('❌ Failed to get odds from API:', oddsError.message);
-      // Don't use fallback - throw error so user knows API isn't working
+    // OPTIMIZATION: Fetch odds in parallel with next game (non-blocking)
+    // Start both requests simultaneously
+    const [oddsResult, nextGameResult] = await Promise.allSettled([
+      (async () => {
+        try {
+          const odds = await getPlayerOdds(playerId, playerName);
+          if (!odds || !odds.line) {
+            throw new Error('API returned no line for player');
+          }
+          console.log(`✅ Got odds from API: ${odds.line} for ${playerName}`);
+          return odds;
+        } catch (oddsError) {
+          console.error('❌ Failed to get odds from API:', oddsError.message);
+          throw oddsError;
+        }
+      })(),
+      // Next game fetch (non-blocking, won't fail the request)
+      (async () => {
+        try {
+          const { getNextGame, searchPlayer } = await import('../services/nbaApiService.js');
+          
+          // Get team abbreviation from multiple sources - prioritize stats
+          let teamAbbrev = null;
+          
+          // First, try from stats.player object
+          if (stats?.player) {
+            if (typeof stats.player === 'object') {
+              teamAbbrev = stats.player.team || stats.player.team?.abbreviation || null;
+            }
+          }
+          
+          // Also try from prediction if available
+          if (!teamAbbrev && prediction?.player_team) {
+            teamAbbrev = prediction.player_team;
+          }
+          
+          // If still no team, try to get it from the player info directly
+          // This handles cases where stats fetch partially failed but we still have player data
+          if (!teamAbbrev && stats?.player) {
+            // Try to get from balldontlie player object directly
+            const axios = (await import('axios')).default;
+            const BALLDONTLIE_API_KEY = process.env.BALLDONTLIE_API_KEY;
+            try {
+              const playerResponse = await Promise.race([
+                axios.get(`https://api.balldontlie.io/v1/players/${playerId}`, {
+                  headers: BALLDONTLIE_API_KEY ? { Authorization: BALLDONTLIE_API_KEY } : {},
+                  timeout: 3000
+                }),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 3000))
+              ]);
+              if (playerResponse.data?.data) {
+                const player = playerResponse.data.data;
+                teamAbbrev = player.team?.abbreviation || null;
+                console.log(`✅ Got team from direct player API call: ${teamAbbrev}`);
+              }
+            } catch (err) {
+              // Ignore errors, just continue
+            }
+          }
+          
+          console.log(`🔍 Next game lookup - teamAbbrev: ${teamAbbrev}, playerName: ${playerName}`);
+          
+          // If we have a team abbreviation, use ESPN API directly (doesn't need player ID)
+          if (teamAbbrev && teamAbbrev !== 'N/A') {
+            const nextGame = await getNextGame(null, teamAbbrev);
+            if (nextGame) {
+              console.log(`✅ Next game found via ESPN: ${teamAbbrev} vs ${nextGame.opponent} on ${nextGame.date}`);
+            } else {
+              console.log(`⚠️ No next game found for ${teamAbbrev}`);
+            }
+            return nextGame;
+          }
+          
+          // Fallback: Try to search for player and get team from NBA.com
+          if (playerName && playerName !== 'Player 115' && playerName !== 'Unknown') {
+            try {
+              const nbaPlayer = await searchPlayer(playerName);
+              if (nbaPlayer && nbaPlayer.id && nbaPlayer.team) {
+                console.log(`✅ Found NBA player: ${nbaPlayer.name} (ID: ${nbaPlayer.id}, Team: ${nbaPlayer.team})`);
+                const finalTeamAbbrev = nbaPlayer.team && nbaPlayer.team !== 'N/A' ? nbaPlayer.team : null;
+                if (finalTeamAbbrev) {
+                  const nextGame = await getNextGame(nbaPlayer.id, finalTeamAbbrev);
+                  if (nextGame) {
+                    console.log(`✅ Next game found: ${finalTeamAbbrev} vs ${nextGame.opponent} on ${nextGame.date}`);
+                  }
+                  return nextGame;
+                }
+              }
+            } catch (searchError) {
+              console.log(`⚠️ Could not search NBA player: ${searchError.message}`);
+            }
+          }
+          
+          console.log(`⚠️ Missing data for next game: teamAbbrev=${teamAbbrev}, playerName=${playerName}`);
+          return null;
+        } catch (nextGameError) {
+          console.log('Could not fetch next game info:', nextGameError.message);
+          console.log('Stack:', nextGameError.stack);
+          return null;
+        }
+      })()
+    ]);
+    
+    const odds = oddsResult.status === 'fulfilled' ? oddsResult.value : null;
+    const nextGame = nextGameResult.status === 'fulfilled' ? nextGameResult.value : null;
+    
+    // If odds failed, throw error
+    if (!odds) {
       throw new Error(`Unable to fetch betting line from API for ${playerName || 'player'}. Please check API configuration or try again later.`);
     }
 
@@ -158,29 +258,27 @@ router.get('/:id/compare', async (req, res) => {
       }
     }
 
-    // Get next game info (if available)
-    let nextGame = null;
-    try {
-      const { getNextGame, searchPlayer } = await import('../services/nbaApiService.js');
-      
-      // Get player's team abbreviation
-      const teamAbbrev = stats?.player?.team || 
-                        (typeof stats?.player === 'object' && stats.player.team) ||
-                        'N/A';
-      
-      if (teamAbbrev && teamAbbrev !== 'N/A' && playerName) {
-        // Search for NBA.com player ID
-        const nbaPlayer = await searchPlayer(playerName);
-        if (nbaPlayer && nbaPlayer.id) {
-          nextGame = await getNextGame(nbaPlayer.id, teamAbbrev);
-          if (nextGame) {
-            console.log(`✅ Next game: vs ${nextGame.opponent} on ${nextGame.date}`);
-          }
-        }
+    // Get team logos
+    const { getTeamLogo, getTeamName } = await import('../services/teamLogoService.js');
+    
+    // Get player team from multiple sources
+    let playerTeam = null;
+    if (stats?.player) {
+      if (typeof stats.player === 'object') {
+        playerTeam = stats.player.team || stats.player.team?.abbreviation || null;
       }
-    } catch (nextGameError) {
-      console.log('Could not fetch next game info:', nextGameError.message);
     }
+    // Also check prediction
+    if (!playerTeam && prediction?.player_team) {
+      playerTeam = prediction.player_team;
+    }
+    // Also check if we can infer from games
+    if (!playerTeam && stats?.games && stats.games.length > 0) {
+      // Try to get from first game if it has team info
+      // Most games don't have team in the game object, so we'll leave this as fallback
+    }
+    
+    const opponentTeam = nextGame?.opponent || null;
     
     const response = {
       player: playerName,
@@ -190,7 +288,14 @@ router.get('/:id/compare', async (req, res) => {
       recommendation,
       confidence: prediction?.confidence || null,
       error_margin: prediction?.error_margin || prediction?.errorMargin || null,
-      next_game: nextGame,
+      next_game: nextGame ? {
+        ...nextGame,
+        opponent_logo: getTeamLogo(opponentTeam),
+        opponent_name: getTeamName(opponentTeam)
+      } : null,
+      player_team: playerTeam,
+      player_team_logo: getTeamLogo(playerTeam),
+      player_team_name: getTeamName(playerTeam),
       odds_source: odds?.source || 'unknown',
       odds_bookmaker: odds?.bookmaker || null,
       player_image: stats?.player?.nba_id 

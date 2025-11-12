@@ -78,14 +78,14 @@ export async function getPlayerOdds(playerId, playerName) {
       }
     ];
     
+    // OPTIMIZATION: Try only the most likely endpoint first, reduce timeout
     for (const attempt of attempts) {
       try {
         console.log(`  🔄 Trying: ${attempt.url}`);
-        console.log(`  📋 Params:`, attempt.params);
         
         const response = await axios.get(attempt.url, {
           params: attempt.params,
-          timeout: 20000,
+          timeout: 10000, // Reduced from 20000
           headers: {
             'Accept': 'application/json',
             'X-API-Key': ODDS_API_KEY // SportsGameOdds uses header authentication
@@ -93,25 +93,21 @@ export async function getPlayerOdds(playerId, playerName) {
         });
         
         console.log(`  📥 Response status: ${response.status}`);
-        console.log(`  📊 Response type: ${Array.isArray(response.data) ? 'array' : typeof response.data}`);
         
         if (response.data) {
           const data = response.data;
           
-          // Log full response structure for debugging
-          console.log(`  📋 Full response:`, JSON.stringify(data, null, 2).substring(0, 2000));
-          
-          // Try to parse the response
+          // Try to parse the response (reduced logging for performance)
           const playerLine = parseSportsGameOddsResponse(data, playerName, preferredBookmakers);
           if (playerLine) {
-            return playerLine;
+            console.log(`  ✅ Successfully found odds on first attempt`);
+            return playerLine; // OPTIMIZATION: Return immediately on success
           }
         }
       } catch (apiError) {
-        console.log(`  ⚠️ Attempt failed:`, apiError.message);
-        if (apiError.response) {
-          console.log(`  📥 Error status: ${apiError.response.status}`);
-          console.log(`  📥 Error data:`, JSON.stringify(apiError.response.data).substring(0, 500));
+        // Only log if it's not a 404 (expected for wrong endpoints)
+        if (apiError.response?.status !== 404) {
+          console.log(`  ⚠️ Attempt failed:`, apiError.message);
         }
         continue;
       }

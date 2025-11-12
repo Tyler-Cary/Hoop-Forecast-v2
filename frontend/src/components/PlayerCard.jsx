@@ -19,26 +19,65 @@ function PlayerCard({ player, comparisonData }) {
           </div>
         )}
         <h2 className="text-3xl font-bold text-gray-800 mb-2">{displayName}</h2>
-        <p className="text-gray-600 mb-4">
-          {player.position} • {player.team?.abbreviation || 'Free Agent'}
-        </p>
+        <div className="flex items-center justify-center gap-2 mb-4">
+          {comparisonData?.player_team_logo && (
+            <img 
+              src={comparisonData.player_team_logo} 
+              alt={comparisonData.player_team_name || player.team?.abbreviation}
+              className="w-8 h-8 object-contain"
+              onError={(e) => {
+                e.target.style.display = 'none';
+              }}
+            />
+          )}
+          <p className="text-gray-600">
+            {player.position} • {comparisonData?.player_team_name || player.team?.abbreviation || 'Free Agent'}
+          </p>
+        </div>
 
         {comparisonData && (
           <div className="mt-6 space-y-4">
             {/* Next Game Info */}
             {comparisonData.next_game && (
               <div className="bg-gradient-to-r from-green-50 to-blue-50 p-4 rounded-lg border-2 border-green-200">
-                <p className="text-sm font-semibold text-gray-700 mb-1">Next Game</p>
-                <p className="text-lg font-bold text-gray-800">
-                  vs {comparisonData.next_game.opponent || 'TBD'}
+                <p className="text-sm font-semibold text-gray-700 mb-2">Next Game</p>
+                <div className="flex items-center justify-center gap-3 mb-2">
+                  {comparisonData.player_team_logo && (
+                    <img 
+                      src={comparisonData.player_team_logo} 
+                      alt={comparisonData.player_team_name || 'Team'}
+                      className="w-10 h-10 object-contain"
+                      onError={(e) => {
+                        e.target.style.display = 'none';
+                      }}
+                    />
+                  )}
+                  <span className="text-gray-400 font-bold">vs</span>
+                  {comparisonData.next_game.opponent_logo ? (
+                    <img 
+                      src={comparisonData.next_game.opponent_logo} 
+                      alt={comparisonData.next_game.opponent_name || comparisonData.next_game.opponent}
+                      className="w-10 h-10 object-contain"
+                      onError={(e) => {
+                        e.target.style.display = 'none';
+                      }}
+                    />
+                  ) : (
+                    <span className="text-lg font-bold text-gray-800">
+                      {comparisonData.next_game.opponent || 'TBD'}
+                    </span>
+                  )}
+                </div>
+                <p className="text-lg font-bold text-gray-800 text-center">
+                  {comparisonData.next_game.opponent_name || comparisonData.next_game.opponent || 'TBD'}
                   {comparisonData.next_game.date && comparisonData.next_game.date !== 'TBD' && (
-                    <span className="text-sm font-normal text-gray-600 ml-2">
-                      ({comparisonData.next_game.date})
+                    <span className="text-sm font-normal text-gray-600 ml-2 block mt-1">
+                      {comparisonData.next_game.date}
                     </span>
                   )}
                 </p>
                 {comparisonData.prediction != null && (
-                  <p className="text-sm text-gray-600 mt-1">
+                  <p className="text-sm text-gray-600 mt-2 text-center">
                     Predicted: <span className="font-bold text-purple-700">{comparisonData.prediction.toFixed(1)} pts</span>
                   </p>
                 )}
@@ -47,10 +86,34 @@ function PlayerCard({ player, comparisonData }) {
             
             <div className="grid grid-cols-2 gap-4">
               <div className="bg-purple-50 p-4 rounded-lg">
-                <p className="text-sm text-gray-600">Predicted Points</p>
-                <p className="text-2xl font-bold text-purple-700">
+                <p className="text-sm text-gray-600 mb-2">Predicted Points</p>
+                <p className="text-2xl font-bold text-purple-700 mb-3">
                   {comparisonData.prediction != null ? comparisonData.prediction.toFixed(1) : 'N/A'}
                 </p>
+                {/* Show opponent for the prediction - Make it prominent */}
+                {comparisonData.next_game && (
+                  <div className="flex items-center justify-center gap-2 mt-3 pt-3 border-t-2 border-purple-300">
+                    <span className="text-xs font-semibold text-gray-500 uppercase">vs</span>
+                    {comparisonData.next_game.opponent_logo ? (
+                      <img 
+                        src={comparisonData.next_game.opponent_logo} 
+                        alt={comparisonData.next_game.opponent_name || comparisonData.next_game.opponent}
+                        className="w-8 h-8 object-contain"
+                        onError={(e) => {
+                          e.target.style.display = 'none';
+                        }}
+                      />
+                    ) : null}
+                    <p className="text-sm font-semibold text-gray-700">
+                      {comparisonData.next_game.opponent_name || comparisonData.next_game.opponent || 'TBD'}
+                    </p>
+                  </div>
+                )}
+                {!comparisonData.next_game && comparisonData.prediction != null && (
+                  <div className="flex items-center justify-center gap-2 mt-3 pt-3 border-t-2 border-purple-300">
+                    <p className="text-xs text-gray-500 italic">Next game TBD</p>
+                  </div>
+                )}
               </div>
               <div className="bg-blue-50 p-4 rounded-lg">
                 <p className="text-sm text-gray-600">Betting Line</p>

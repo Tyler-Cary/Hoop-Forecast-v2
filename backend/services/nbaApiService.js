@@ -208,79 +208,252 @@ export async function getPlayerGameLog(playerId) {
 
 /**
  * Get player's next scheduled game
+ * Uses ESPN's free API (no authentication required)
+ * @param {number|null} nbaPlayerId - NBA.com player ID (optional, not needed for ESPN API)
+ * @param {string} teamAbbrev - Team abbreviation (required)
  */
 export async function getNextGame(nbaPlayerId, teamAbbrev) {
   try {
-    if (!nbaPlayerId || !teamAbbrev) {
+    // ESPN API only needs team abbreviation, nbaPlayerId is optional
+    if (!teamAbbrev || teamAbbrev === 'N/A') {
+      console.log(`⚠️ Missing team abbreviation for getNextGame: teamAbbrev=${teamAbbrev}`);
       return null;
     }
     
-    const currentSeason = getCurrentSeason();
+    console.log(`🔍 Fetching next game for team: ${teamAbbrev} using ESPN API`);
+    
+    // Map team abbreviation to ESPN team ID
+    const espnTeamId = getEspnTeamId(teamAbbrev);
+    if (!espnTeamId) {
+      console.log(`⚠️ Could not find ESPN team ID for abbreviation: ${teamAbbrev}`);
+      return null;
+    }
+    
+    console.log(`✅ Found ESPN team ID: ${espnTeamId} for ${teamAbbrev}`);
+    
     const today = new Date();
-    const todayStr = today.toISOString().split('T')[0].replace(/-/g, '');
+    today.setHours(0, 0, 0, 0);
     
-    // Get team schedule to find next game
-    // First, we need to get the team ID from abbreviation
-    const teamScheduleUrl = `${NBA_API_BASE}/teamschedule`;
-    const params = {
-      LeagueID: '00',
-      Season: currentSeason,
-      SeasonType: 'Regular Season',
-      TeamID: 0 // We'll need to map abbreviation to ID
-    };
-    
-    // Try using scoreboard to find upcoming games for the team
-    // Check next 7 days for games
-    for (let dayOffset = 0; dayOffset <= 7; dayOffset++) {
-      const checkDate = new Date(today);
-      checkDate.setDate(today.getDate() + dayOffset);
-      const dateStr = checkDate.toISOString().split('T')[0].replace(/-/g, '');
+    // Use ESPN's team schedule endpoint
+    try {
+      const espnScheduleUrl = `https://site.web.api.espn.com/apis/site/v2/sports/basketball/nba/teams/${espnTeamId}/schedule`;
+      const scheduleResponse = await axios.get(espnScheduleUrl, {
+        params: {
+          region: 'us',
+          lang: 'en',
+          contentorigin: 'espn'
+        },
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+          'Accept': 'application/json'
+        },
+        timeout: 10000
+      });
       
-      try {
-        const scoreboardUrl = `${NBA_API_BASE}/scoreboard`;
-        const scoreboardResponse = await axios.get(scoreboardUrl, {
-          params: {
-            LeagueID: '00',
-            GameDate: dateStr,
-            DayOffset: dayOffset
-          },
-          headers: NBA_HEADERS,
-          timeout: 10000
-        });
+      console.log(`📥 ESPN schedule response status: ${scheduleResponse.status}`);
+      
+      if (scheduleResponse.data && scheduleResponse.data.events) {
+        const events = scheduleResponse.data.events || [];
+        console.log(`📅 Found ${events.length} games in ESPN schedule`);
         
-        if (scoreboardResponse.data && scoreboardResponse.data.resultSets) {
-          const games = scoreboardResponse.data.resultSets[0]?.rowSet || [];
+        // Find next game (future game)
+        for (const event of events) {
+          if (!event.date) continue;
           
-          // Find game with the player's team
-          for (const game of games) {
-            const homeTeam = game[6]; // Home team abbreviation
-            const awayTeam = game[7]; // Away team abbreviation
-            
-            if (homeTeam === teamAbbrev || awayTeam === teamAbbrev) {
-              const opponent = homeTeam === teamAbbrev ? awayTeam : homeTeam;
-              const gameDate = game[0]; // Game date
-              const gameTime = game[2] || 'TBD'; // Game time
+          // Parse game date
+          const gameDate = new Date(event.date);
+          gameDate.setHours(0, 0, 0, 0);
+          
+          // Check if this is a future game
+          if (gameDate >= today) {
+            // This is the next game!
+            const competitions = event.competitions || [];
+            if (competitions.length > 0) {
+              const competition = competitions[0];
+              const competitors = competition.competitors || [];
               
-              return {
-                opponent: opponent,
-                date: formatGameDate(gameDate),
-                time: gameTime,
-                isHome: homeTeam === teamAbbrev
-              };
+              // Find opponent
+              let opponent = null;
+              let isHome = false;
+              
+              // Normalize team abbreviation for comparison (ESPN uses GS, UTAH, etc.)
+              const normalizedTeamAbbrev = normalizeEspnAbbrev(teamAbbrev);
+              
+              for (const competitor of competitors) {
+                const teamAbbrevFromEspn = competitor.team?.abbreviation || competitor.team?.shortDisplayName || '';
+                const normalizedEspnAbbrev = normalizeEspnAbbrev(teamAbbrevFromEspn);
+                const isHomeTeam = competitor.homeAway === 'home';
+                
+                if (normalizedEspnAbbrev === normalizedTeamAbbrev) {
+                  isHome = isHomeTeam;
+                } else {
+                  // Map ESPN abbreviation back to standard NBA abbreviation
+                  opponent = mapEspnToNbaAbbrev(teamAbbrevFromEspn) || teamAbbrevFromEspn;
+                }
+              }
+              
+              if (opponent) {
+                // Format date
+                const formattedDate = gameDate.toLocaleDateString('en-US', { 
+                  month: 'short', 
+                  day: 'numeric', 
+                  year: 'numeric' 
+                });
+                
+                // Get game time if available
+                let gameTime = 'TBD';
+                if (event.date) {
+                  const timeDate = new Date(event.date);
+                  const hours = timeDate.getHours();
+                  const minutes = timeDate.getMinutes();
+                  if (hours !== 0 || minutes !== 0) {
+                    gameTime = timeDate.toLocaleTimeString('en-US', { 
+                      hour: 'numeric', 
+                      minute: '2-digit',
+                      hour12: true 
+                    });
+                  }
+                }
+                
+                console.log(`✅ Found next game via ESPN: ${teamAbbrev} vs ${opponent} on ${formattedDate}`);
+                return {
+                  opponent: opponent,
+                  date: formattedDate,
+                  time: gameTime,
+                  isHome: isHome
+                };
+              }
             }
           }
         }
-      } catch (err) {
-        // Continue to next day
-        continue;
+      }
+    } catch (espnError) {
+      console.log(`⚠️ ESPN schedule endpoint failed: ${espnError.message}`);
+      if (espnError.response) {
+        console.log(`   Status: ${espnError.response.status}`);
+        console.log(`   Data:`, JSON.stringify(espnError.response.data).substring(0, 200));
       }
     }
     
+    console.log(`❌ Could not find next game for ${teamAbbrev}`);
     return null;
   } catch (error) {
     console.error('Error fetching next game:', error.message);
+    console.error('Stack:', error.stack);
     return null;
   }
+}
+
+/**
+ * Normalize ESPN team abbreviation to standard NBA abbreviation
+ */
+function normalizeEspnAbbrev(abbrev) {
+  if (!abbrev) return '';
+  const upper = abbrev.toUpperCase();
+  // ESPN uses GS, UTAH, etc. - normalize to standard
+  if (upper === 'GS') return 'GSW';
+  if (upper === 'UTAH') return 'UTA';
+  return upper;
+}
+
+/**
+ * Map ESPN abbreviation back to standard NBA abbreviation
+ */
+function mapEspnToNbaAbbrev(espnAbbrev) {
+  if (!espnAbbrev) return null;
+  const upper = espnAbbrev.toUpperCase();
+  const mapping = {
+    'GS': 'GSW',
+    'UTAH': 'UTA'
+  };
+  return mapping[upper] || upper;
+}
+
+/**
+ * Get ESPN team ID from NBA team abbreviation
+ * Note: ESPN uses different abbreviations for some teams (e.g., GS instead of GSW, UTAH instead of UTA)
+ */
+function getEspnTeamId(abbrev) {
+  const teamMap = {
+    'ATL': '1',      // Atlanta Hawks
+    'BOS': '2',      // Boston Celtics
+    'BKN': '17',     // Brooklyn Nets
+    'CHA': '30',     // Charlotte Hornets
+    'CHI': '4',      // Chicago Bulls
+    'CLE': '5',      // Cleveland Cavaliers
+    'DAL': '6',      // Dallas Mavericks
+    'DEN': '7',      // Denver Nuggets
+    'DET': '8',      // Detroit Pistons
+    'GSW': '9',      // Golden State Warriors (ESPN uses "GS" but we map GSW -> 9)
+    'GS': '9',       // Golden State Warriors (ESPN abbreviation)
+    'HOU': '10',     // Houston Rockets
+    'IND': '11',     // Indiana Pacers
+    'LAC': '12',     // LA Clippers
+    'LAL': '13',     // Los Angeles Lakers
+    'MEM': '29',     // Memphis Grizzlies
+    'MIA': '14',     // Miami Heat
+    'MIL': '15',     // Milwaukee Bucks
+    'MIN': '16',     // Minnesota Timberwolves
+    'NO': '3',       // New Orleans Pelicans
+    'NOP': '3',      // New Orleans Pelicans
+    'NYK': '18',     // New York Knicks
+    'OKC': '25',     // Oklahoma City Thunder
+    'ORL': '19',     // Orlando Magic
+    'PHI': '20',     // Philadelphia 76ers
+    'PHX': '21',     // Phoenix Suns
+    'POR': '22',     // Portland Trail Blazers
+    'SAC': '23',     // Sacramento Kings
+    'SA': '24',      // San Antonio Spurs
+    'SAS': '24',     // San Antonio Spurs
+    'TOR': '28',     // Toronto Raptors
+    'UTA': '26',     // Utah Jazz
+    'UTAH': '26',    // Utah Jazz (ESPN abbreviation)
+    'WAS': '27'      // Washington Wizards
+  };
+  
+  return teamMap[abbrev.toUpperCase()] || null;
+}
+
+/**
+ * Get team ID from abbreviation
+ */
+function getTeamIdFromAbbrev(abbrev) {
+  const teamMap = {
+    'ATL': 1610612737,
+    'BOS': 1610612738,
+    'BKN': 1610612751,
+    'CHA': 1610612766,
+    'CHI': 1610612741,
+    'CLE': 1610612739,
+    'DAL': 1610612742,
+    'DEN': 1610612743,
+    'DET': 1610612765,
+    'GSW': 1610612744,
+    'HOU': 1610612745,
+    'IND': 1610612754,
+    'LAC': 1610612746,
+    'LAL': 1610612747,
+    'MEM': 1610612763,
+    'MIA': 1610612748,
+    'MIL': 1610612749,
+    'MIN': 1610612750,
+    'NO': 1610612740,
+    'NOP': 1610612740,
+    'NYK': 1610612752,
+    'OKC': 1610612760,
+    'ORL': 1610612753,
+    'PHI': 1610612755,
+    'PHX': 1610612756,
+    'POR': 1610612757,
+    'SAC': 1610612758,
+    'SA': 1610612759,
+    'SAS': 1610612759,
+    'TOR': 1610612761,
+    'UTA': 1610612762,
+    'WAS': 1610612764
+  };
+  
+  return teamMap[abbrev.toUpperCase()] || null;
 }
 
 /**
