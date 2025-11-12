@@ -8,7 +8,7 @@ import { searchRoutes } from './routes/searchRoutes.js';
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 5001;
 
 // Middleware
 app.use(cors());
@@ -23,8 +23,19 @@ app.get('/api/health', (req, res) => {
 app.use('/api/player', playerRoutes);
 app.use('/api/search', searchRoutes);
 
-// Start server
+// Start server with error handling
 app.listen(PORT, () => {
   console.log(`🏀 HoopForecast API server running on http://localhost:${PORT}`);
+}).on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`❌ Port ${PORT} is already in use.`);
+    console.error(`💡 Try one of these solutions:`);
+    console.error(`   1. Kill the process: lsof -ti:${PORT} | xargs kill -9`);
+    console.error(`   2. Use a different port: PORT=5001 npm run dev`);
+    console.error(`   3. Check what's using the port: lsof -i:${PORT}`);
+  } else {
+    console.error('❌ Server error:', err);
+  }
+  process.exit(1);
 });
 

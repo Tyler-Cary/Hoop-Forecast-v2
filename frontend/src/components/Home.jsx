@@ -9,16 +9,17 @@ function Home({ onSelectPlayer }) {
   const [isSearching, setIsSearching] = useState(false);
   const [error, setError] = useState(null);
 
-  // Debounced search
+  // Debounced search - increased delay to reduce API calls
   useEffect(() => {
     if (!searchQuery.trim()) {
       setSearchResults([]);
       return;
     }
 
+    // Increase debounce time to reduce API calls and avoid rate limits
     const timeoutId = setTimeout(() => {
       performSearch(searchQuery);
-    }, 300);
+    }, 800); // Increased from 300ms to 800ms
 
     return () => clearTimeout(timeoutId);
   }, [searchQuery]);
@@ -34,7 +35,8 @@ function Home({ onSelectPlayer }) {
       setSearchResults(response.data || []);
     } catch (err) {
       console.error('Search error:', err);
-      setError('Failed to search players. Please try again.');
+      const errorMessage = err.response?.data?.error || err.message || 'Failed to search players. Please try again.';
+      setError(errorMessage);
       setSearchResults([]);
     } finally {
       setIsSearching(false);

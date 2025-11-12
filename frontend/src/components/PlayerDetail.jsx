@@ -20,11 +20,22 @@ function PlayerDetail({ player, onBack }) {
     setError(null);
 
     try {
+      console.log(`Fetching comparison data for player ID: ${player.id}`);
       const response = await axios.get(`${API_BASE}/player/${player.id}/compare`);
+      console.log('Received comparison data:', response.data);
       setComparisonData(response.data);
     } catch (err) {
       console.error('Error fetching comparison data:', err);
-      setError(err.response?.data?.error || 'Failed to load player data');
+      console.error('Error response:', err.response?.data);
+      setError(err.response?.data?.error || err.message || 'Failed to load player data');
+      // Set empty comparison data so UI doesn't break
+      setComparisonData({
+        player: `${player.first_name} ${player.last_name}`,
+        stats: [],
+        prediction: null,
+        betting_line: null,
+        recommendation: 'N/A'
+      });
     } finally {
       setLoading(false);
     }
