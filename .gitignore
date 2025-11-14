@@ -43,3 +43,13 @@ env/
 frontend/dist/
 frontend/.vite/
 
+# Cache and data
+backend/data/cache/
+*.db
+*.sqlite
+*.sqlite3
+
+# Player images (optional - can be regenerated)
+# Uncomment if you don't want to commit player images
+# backend/public/images/players/
+

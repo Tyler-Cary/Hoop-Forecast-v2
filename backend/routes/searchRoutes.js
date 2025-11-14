@@ -1,6 +1,5 @@
 import express from 'express';
 import { searchPlayersESPN } from '../services/nbaApiService.js';
-import { getActivePlayers } from '../services/balldontlieService.js';
 
 const router = express.Router();
 
@@ -26,20 +25,6 @@ router.get('/', async (req, res) => {
       error: error.message || 'Failed to search players',
       details: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
-  }
-});
-
-/**
- * GET /api/search/active
- * Get list of active players
- */
-router.get('/active', async (req, res) => {
-  try {
-    const players = await getActivePlayers();
-    res.json(players);
-  } catch (error) {
-    console.error('Error fetching active players:', error);
-    res.status(500).json({ error: error.message || 'Failed to fetch active players' });
   }
 });
 

@@ -1,22 +1,31 @@
 {
-  "name": "hoopforecast-backend",
-  "version": "1.0.0",
-  "description": "Backend API for NBA points prediction app",
+  "name": "hoopforecast-v2-backend",
+  "version": "2.0.0",
+  "description": "Backend API for HoopForecast v2 - AI-powered NBA player points prediction with real-time betting line comparison",
   "main": "server.js",
   "type": "module",
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js"
   },
-  "keywords": ["nba", "prediction", "betting"],
+  "keywords": [
+    "nba",
+    "prediction",
+    "betting",
+    "ai",
+    "chatgpt",
+    "sports",
+    "basketball"
+  ],
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "express": "^4.18.2",
-    "cors": "^2.8.5",
     "axios": "^1.6.0",
+    "cors": "^2.8.5",
     "dotenv": "^16.3.1",
-    "ml-regression": "^1.0.0"
+    "express": "^4.18.2",
+    "ml-regression": "^1.0.0",
+    "node-cache": "^5.1.2",
+    "openai": "^6.8.1"
   }
 }
-

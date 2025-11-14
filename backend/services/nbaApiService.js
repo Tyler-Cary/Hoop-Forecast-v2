@@ -23,7 +23,19 @@ export async function searchPlayersESPN(playerName) {
   try {
     console.log(`🔍 Searching ESPN for players: "${playerName}"`);
     
-    const searchName = playerName.toLowerCase().trim();
+    const normalizeName = (value) => {
+      if (!value) return '';
+      return value
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '') // Remove diacritics
+        .replace(/[^a-z0-9\s]/g, '') // Remove punctuation/special characters
+        .replace(/\s+/g, ' ')
+        .trim();
+    };
+    
+    const searchName = normalizeName(playerName);
+    const searchTokens = searchName.split(' ').filter(Boolean);
     const results = [];
     
     // ESPN API endpoint for NBA teams
@@ -74,43 +86,79 @@ export async function searchPlayersESPN(playerName) {
           timeout: 10000
         });
         
-        if (!rosterResponse.data || !rosterResponse.data.athletes) {
+        if (!rosterResponse.data) {
           return [];
         }
         
-        const athletes = rosterResponse.data.athletes || [];
+        const athletesGroups = Array.isArray(rosterResponse.data.athletes)
+          ? rosterResponse.data.athletes
+          : [];
+        const athletes = athletesGroups.flatMap(group => {
+          if (!group) return [];
+          if (Array.isArray(group.items)) {
+            return group.items;
+          }
+          return group; // in case API already returns flat array
+        });
+        
         const teamAbbrev = team.team?.abbreviation || team.team?.shortDisplayName || 'N/A';
         const teamName = team.team?.displayName || team.team?.name || 'N/A';
         
         // Filter athletes matching search name
         const matchingPlayers = athletes
           .filter(athlete => {
-            const fullName = `${athlete.firstName || ''} ${athlete.lastName || ''}`.toLowerCase();
-            const displayName = (athlete.displayName || '').toLowerCase();
-            const shortName = (athlete.shortName || '').toLowerCase();
+            const base = athlete.athlete || athlete;
+            if (!base) return false;
             
-            return fullName.includes(searchName) || 
-                   displayName.includes(searchName) || 
-                   shortName.includes(searchName);
+            const fullNameRaw = `${base.firstName || ''} ${base.lastName || ''}`.trim();
+            const displayNameRaw = base.displayName || fullNameRaw;
+            const shortNameRaw = base.shortName || displayNameRaw;
+            
+            const fullName = normalizeName(fullNameRaw);
+            const displayName = normalizeName(displayNameRaw);
+            const shortName = normalizeName(shortNameRaw);
+            
+            if (!fullName && !displayName && !shortName) {
+              return false;
+            }
+            
+            if (fullName.includes(searchName) || displayName.includes(searchName) || shortName.includes(searchName)) {
+              return true;
+            }
+            
+            if (searchTokens.length > 1) {
+              return searchTokens.every(token => 
+                fullName.includes(token) || displayName.includes(token) || shortName.includes(token)
+              );
+            }
+            
+            return fullName.startsWith(searchName) || displayName.startsWith(searchName) || shortName.startsWith(searchName);
           })
           .map(athlete => {
-            const fullName = `${athlete.firstName || ''} ${athlete.lastName || ''}`.trim();
+            const base = athlete.athlete || athlete;
+            const positionInfo = athlete.position || base.position || {};
+            const headshot = base.headshot?.href || base.headshot || null;
+            const jersey = base.jersey || athlete.jersey || null;
+            const playerId = base.id || athlete.id;
+            const firstName = base.firstName || '';
+            const lastName = base.lastName || '';
+            const fullName = `${firstName} ${lastName}`.trim();
             
             return {
-              id: athlete.id, // ESPN ID (we use name for API calls now)
-              first_name: athlete.firstName || '',
-              last_name: athlete.lastName || '',
+              id: playerId, // ESPN ID
+              first_name: firstName,
+              last_name: lastName,
               full_name: fullName,
-              display_name: athlete.displayName || fullName,
-              position: athlete.position?.abbreviation || athlete.position?.name || 'N/A',
+              display_name: base.displayName || fullName,
+              position: positionInfo.abbreviation || positionInfo.name || 'N/A',
               team: {
                 abbreviation: teamAbbrev,
                 name: teamName
               },
               team_name: teamName,
-              jersey: athlete.jersey || null,
-              headshot: athlete.headshot?.href || null,
-              espn_id: athlete.id
+              jersey: jersey,
+              headshot: headshot,
+              espn_id: playerId
             };
           });
         
@@ -143,8 +191,8 @@ export async function searchPlayersESPN(playerName) {
     
     // Sort by relevance (exact name matches first)
     uniqueResults.sort((a, b) => {
-      const aName = a.full_name.toLowerCase();
-      const bName = b.full_name.toLowerCase();
+      const aName = normalizeName(a.full_name);
+      const bName = normalizeName(b.full_name);
       const aStarts = aName.startsWith(searchName);
       const bStarts = bName.startsWith(searchName);
       
@@ -154,7 +202,7 @@ export async function searchPlayersESPN(playerName) {
     });
     
     console.log(`✅ Found ${uniqueResults.length} matching players from ESPN`);
-    return uniqueResults.slice(0, 25); // Limit to 25 results
+    return uniqueResults.slice(0, 25);
     
   } catch (error) {
     console.error('❌ Error searching ESPN for players:', error.message);
@@ -184,7 +232,11 @@ export async function getPlayerStatsFromNBA(playerName) {
     console.log(`✅ Found NBA.com player: ${nbaPlayer.name} (ID: ${nbaPlayer.id})`);
     
     // Get game log
-    const games = await getPlayerGameLog(nbaPlayer.id);
+    const games = await getPlayerGameLog(nbaPlayer.id, {
+      includePreviousSeason: true,
+      currentSeasonGames: 10,
+      previousSeasonGames: 20
+    });
     
     if (!games || games.length === 0) {
       throw new Error(`No game data found for ${playerName}`);
@@ -203,6 +255,13 @@ export async function getPlayerStatsFromNBA(playerName) {
     const firstName = nameParts[0] || '';
     const lastName = nameParts.slice(1).join(' ') || '';
     
+    const teamAbbrev = typeof nbaPlayer.team === 'string'
+      ? nbaPlayer.team
+      : nbaPlayer.team?.abbreviation || nbaPlayer.team?.name || 'N/A';
+    const teamName = typeof nbaPlayer.team === 'object'
+      ? nbaPlayer.team?.name || nbaPlayer.team?.abbreviation || 'N/A'
+      : nbaPlayer.team || 'N/A';
+
     return {
       player: {
         id: nbaPlayer.id,
@@ -210,7 +269,12 @@ export async function getPlayerStatsFromNBA(playerName) {
         first_name: playerInfo?.first_name || firstName,
         last_name: playerInfo?.last_name || lastName,
         position: playerInfo?.position || 'N/A',
-        team: nbaPlayer.team || 'N/A'
+        team: teamAbbrev,
+        team_name: teamName,
+        team_details: {
+          abbreviation: teamAbbrev,
+          name: teamName
+        }
       },
       games: games
     };
@@ -228,17 +292,67 @@ export async function searchPlayer(playerName) {
   try {
     // NBA.com uses a commonallplayers endpoint
     const url = `${NBA_API_BASE}/commonallplayers`;
-    const params = {
-      LeagueID: '00',
-      Season: getCurrentSeason(),
-      IsOnlyCurrentSeason: 0
+    const normalizeName = (value) => {
+      if (!value) return '';
+      return value
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^a-z0-9\s]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
     };
     
-    const response = await axios.get(url, {
-      params,
-      headers: NBA_HEADERS,
-      timeout: 10000
-    });
+    const searchTokens = normalizeName(playerName).split(' ').filter(Boolean);
+    
+    // Try with retry logic for rate limiting
+    let response = null;
+    let lastError = null;
+    
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        response = await axios.get(url, {
+          params: {
+            LeagueID: '00',
+            Season: getCurrentSeason(),
+            IsOnlyCurrentSeason: 0
+          },
+          headers: NBA_HEADERS,
+          timeout: 20000, // Increased timeout
+          validateStatus: (status) => status < 500 // Don't throw on 403/404
+        });
+        
+        // Check if we got a valid response
+        if (response.status === 403 || response.status === 429) {
+          if (attempt < 2) {
+            console.log(`⚠️ NBA.com search returned ${response.status}, waiting before retry ${attempt + 1}/3...`);
+            await new Promise(resolve => setTimeout(resolve, 2000 * (attempt + 1)));
+            continue;
+          } else {
+            throw new Error(`NBA.com API returned ${response.status}. The API may be rate-limiting requests.`);
+          }
+        }
+        
+        break; // Success
+      } catch (error) {
+        lastError = error;
+        if (error.response && (error.response.status === 403 || error.response.status === 429)) {
+          if (attempt < 2) {
+            console.log(`⚠️ NBA.com search error ${error.response.status}, waiting before retry ${attempt + 1}/3...`);
+            await new Promise(resolve => setTimeout(resolve, 2000 * (attempt + 1)));
+            continue;
+          }
+        }
+        // If it's a timeout or other error on last attempt, throw
+        if (attempt === 2 || (error.code === 'ECONNABORTED' && attempt >= 1)) {
+          throw error;
+        }
+      }
+    }
+    
+    if (!response) {
+      throw lastError || new Error('Failed to search NBA.com after retries');
+    }
     
     if (response.data && response.data.resultSets && response.data.resultSets[0]) {
       const players = response.data.resultSets[0].rowSet || [];
@@ -258,18 +372,46 @@ export async function searchPlayer(playerName) {
       // Search for matching player
       const searchName = playerName.toLowerCase();
       const matches = players.filter(player => {
-        const name = (player[playerNameIndex] || '').toLowerCase();
-        return name.includes(searchName);
+        const displayNameRaw = player[playerNameIndex] || '';
+        const normalizedName = normalizeName(displayNameRaw);
+        if (!normalizedName) return false;
+        if (searchTokens.length === 0) return false;
+        return searchTokens.every(token => normalizedName.includes(token));
       });
       
-      if (matches.length > 0) {
-        const player = matches[0];
+      const mappedPlayers = matches.slice(0, 50).map(player => {
+        const displayNameRaw = player[playerNameIndex] || '';
+        const [firstName, ...rest] = displayNameRaw.split(' ');
+        const lastName = rest.join(' ');
         return {
           id: player[playerIdIndex],
-          name: player[playerNameIndex],
-          team: player[headers.indexOf('TEAM_ABBREVIATION')] || 'N/A'
+          name: displayNameRaw,
+          nameParts: {
+            firstName: firstName || '',
+            lastName: lastName || '',
+            fullName: displayNameRaw
+          },
+          team: {
+            abbreviation: player[headers.indexOf('TEAM_ABBREVIATION')] || 'N/A',
+            name: player[headers.indexOf('TEAM_ABBREVIATION')] || 'N/A'
+          },
+          position: player[headers.indexOf('POSITION')] || 'N/A',
+          headshot: null,
+          source: 'commonallplayers'
         };
+      });
+      
+      if (mappedPlayers.length === 0) {
+        return null;
       }
+      
+      // Rank best match: exact normalized name first, then startswith, otherwise first result
+      const normalizedSearch = normalizeName(playerName);
+      const bestMatch = mappedPlayers.find(p => normalizeName(p.nameParts.fullName) === normalizedSearch)
+        || mappedPlayers.find(p => normalizeName(p.nameParts.fullName).startsWith(normalizedSearch))
+        || mappedPlayers[0];
+      
+      return bestMatch;
     }
     
     return null;
@@ -282,8 +424,14 @@ export async function searchPlayer(playerName) {
 /**
  * Get player's game log (last 10 games)
  */
-export async function getPlayerGameLog(playerId) {
+export async function getPlayerGameLog(playerId, options = {}) {
   try {
+    const {
+      includePreviousSeason = false,
+      currentSeasonGames = 10,
+      previousSeasonGames = 20
+    } = options;
+
     const currentSeason = getCurrentSeason();
     
     // Use playergamelog endpoint
@@ -297,11 +445,48 @@ export async function getPlayerGameLog(playerId) {
     
     console.log(`📊 Fetching game log from NBA.com for player ${playerId}...`);
     
-    const response = await axios.get(url, {
-      params,
-      headers: NBA_HEADERS,
-      timeout: 15000
-    });
+    // Try with retry logic for rate limiting
+    let response = null;
+    let lastError = null;
+    
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        response = await axios.get(url, {
+          params,
+          headers: NBA_HEADERS,
+          timeout: 20000, // Increased timeout
+          validateStatus: (status) => status < 500
+        });
+        
+        if (response.status === 403 || response.status === 429) {
+          if (attempt < 2) {
+            console.log(`⚠️ NBA.com game log returned ${response.status}, waiting before retry ${attempt + 1}/3...`);
+            await new Promise(resolve => setTimeout(resolve, 2000 * (attempt + 1)));
+            continue;
+          } else {
+            throw new Error(`NBA.com API returned ${response.status}. The API may be rate-limiting requests.`);
+          }
+        }
+        
+        break;
+      } catch (error) {
+        lastError = error;
+        if (error.response && (error.response.status === 403 || error.response.status === 429)) {
+          if (attempt < 2) {
+            console.log(`⚠️ NBA.com game log error ${error.response.status}, waiting before retry ${attempt + 1}/3...`);
+            await new Promise(resolve => setTimeout(resolve, 2000 * (attempt + 1)));
+            continue;
+          }
+        }
+        if (attempt === 2 || (error.code === 'ECONNABORTED' && attempt >= 1)) {
+          throw error;
+        }
+      }
+    }
+    
+    if (!response) {
+      throw lastError || new Error('Failed to fetch game log from NBA.com after retries');
+    }
     
     if (!response.data || !response.data.resultSets || !response.data.resultSets[0]) {
       throw new Error('Invalid response from NBA.com API');
@@ -321,9 +506,8 @@ export async function getPlayerGameLog(playerId) {
     if (ptsIndex === -1) {
       throw new Error('Could not find PTS column in NBA.com response');
     }
-    
-    // Process games (most recent first, take last 10)
-    const processedGames = games.slice(0, 10).map((game, index) => {
+    const processGames = (gamesArray, seasonLabel, limit) => {
+      return gamesArray.slice(0, limit).map((game, index) => {
       const gameDate = game[gameDateIndex] || '';
       const matchup = game[matchupIndex] || '';
       const points = parseInt(game[ptsIndex]) || 0;
@@ -377,7 +561,7 @@ export async function getPlayerGameLog(playerId) {
         }
         
         // Debug logging for first game
-        if (index === 0) {
+        if (index === 0 && seasonLabel === currentSeason) {
           console.log(`  🔍 Matchup parsing: "${matchup}" → opponent: "${opponent}", home: ${isHome}`);
         }
       }
@@ -392,13 +576,49 @@ export async function getPlayerGameLog(playerId) {
         opponent: opponent,
         minutes: minutes,
         home: isHome,
-        result: result
+        result: result,
+        season: seasonLabel
       };
-    });
+      });
+    };
+
+    const processedCurrentGames = processGames(games, currentSeason, currentSeasonGames);
+
+    let processedPreviousGames = [];
+    if (includePreviousSeason) {
+      try {
+        const previousSeason = getPreviousSeason(currentSeason);
+        console.log(`📊 Fetching previous season (${previousSeason}) game log for player ${playerId}...`);
+        
+        const previousResponse = await axios.get(url, {
+          params: {
+            LeagueID: '00',
+            PlayerID: playerId,
+            Season: previousSeason,
+            SeasonType: 'Regular Season'
+          },
+          headers: NBA_HEADERS,
+          timeout: 15000
+        });
+        
+        if (previousResponse.data?.resultSets?.[0]) {
+          const previousGameLog = previousResponse.data.resultSets[0];
+          const previousGamesArray = previousGameLog.rowSet || [];
+          processedPreviousGames = processGames(previousGamesArray, previousSeason, previousSeasonGames);
+        }
+      } catch (prevError) {
+        console.log(`⚠️ Could not fetch previous season data: ${prevError.message}`);
+      }
+    }
     
-    console.log(`✅ Retrieved ${processedGames.length} games from NBA.com`);
+    const processedGames = [...processedCurrentGames, ...processedPreviousGames].map((game, index) => ({
+      ...game,
+      game_number: index + 1
+    }));
+    
+    console.log(`✅ Retrieved ${processedGames.length} games from NBA.com (current season: ${processedCurrentGames.length}, previous seasons: ${processedPreviousGames.length})`);
     processedGames.slice(0, 3).forEach(game => {
-      console.log(`  Game ${game.game_number}: ${game.points} pts vs ${game.opponent} on ${game.date}`);
+      console.log(`  Game ${game.game_number}: ${game.points} pts vs ${game.opponent} on ${game.date} (Season ${game.season})`);
     });
     
     return processedGames;
@@ -700,6 +920,22 @@ function getCurrentSeason() {
 }
 
 /**
+ * Get previous NBA season string given current season (e.g., "2024-25" -> "2023-24")
+ */
+function getPreviousSeason(season) {
+  if (!season || !season.includes('-')) {
+    const current = getCurrentSeason();
+    return getPreviousSeason(current);
+  }
+  
+  const [start, end] = season.split('-');
+  const startYear = parseInt(start, 10);
+  const previousStartYear = startYear - 1;
+  const previousEndYearShort = String(startYear).slice(-2);
+  return `${previousStartYear}-${previousEndYearShort}`;
+}
+
+/**
  * Get player info by ID
  */
 export async function getPlayerInfo(playerId) {
@@ -709,11 +945,52 @@ export async function getPlayerInfo(playerId) {
       PlayerID: playerId
     };
     
-    const response = await axios.get(url, {
-      params,
-      headers: NBA_HEADERS,
-      timeout: 10000
-    });
+    // Try with longer timeout and retry logic
+    let response = null;
+    let lastError = null;
+    
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        response = await axios.get(url, {
+          params,
+          headers: NBA_HEADERS,
+          timeout: 20000, // Increased timeout
+          validateStatus: (status) => status < 500 // Don't throw on 403/404, handle it
+        });
+        
+        // Check if we got a valid response
+        if (response.status === 403 || response.status === 429) {
+          // Rate limited or blocked - wait a bit and retry
+          if (attempt < 2) {
+            console.log(`⚠️ NBA.com returned ${response.status}, waiting before retry ${attempt + 1}/3...`);
+            await new Promise(resolve => setTimeout(resolve, 2000 * (attempt + 1))); // Exponential backoff
+            continue;
+          } else {
+            throw new Error(`NBA.com API returned ${response.status}. The API may be rate-limiting requests.`);
+          }
+        }
+        
+        // Success
+        break;
+      } catch (error) {
+        lastError = error;
+        if (error.response && (error.response.status === 403 || error.response.status === 429)) {
+          if (attempt < 2) {
+            console.log(`⚠️ NBA.com error ${error.response.status}, waiting before retry ${attempt + 1}/3...`);
+            await new Promise(resolve => setTimeout(resolve, 2000 * (attempt + 1)));
+            continue;
+          }
+        }
+        // If it's a timeout or other error, throw immediately
+        if (attempt === 2 || error.code === 'ECONNABORTED') {
+          throw error;
+        }
+      }
+    }
+    
+    if (!response) {
+      throw lastError || new Error('Failed to fetch from NBA.com after retries');
+    }
     
     if (response.data && response.data.resultSets && response.data.resultSets[0]) {
       const playerData = response.data.resultSets[0].rowSet[0];

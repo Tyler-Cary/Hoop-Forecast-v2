@@ -1,6 +1,7 @@
 {
-  "name": "hoopforecast-frontend",
-  "version": "1.0.0",
+  "name": "hoopforecast-v2-frontend",
+  "version": "2.0.0",
+  "description": "Frontend for HoopForecast v2 - Modern NBA prediction interface",
   "private": true,
   "type": "module",
   "scripts": {
