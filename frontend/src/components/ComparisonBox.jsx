@@ -26,31 +26,31 @@ function ComparisonBox({ comparisonData }) {
     : null;
 
   return (
-    <div className="bg-white rounded-lg shadow-xl p-6">
-      <h3 className="text-2xl font-bold text-gray-800 mb-4 text-center">
+    <div className="bg-gray-800 rounded-lg shadow-xl p-6 border border-gray-700">
+      <h3 className="text-2xl font-bold text-white mb-4 text-center">
         Prediction vs. Betting Line
       </h3>
 
       <div className="space-y-4">
-        <div className="flex justify-between items-center p-4 bg-gray-50 rounded-lg">
-          <span className="font-semibold text-gray-700">Our Prediction:</span>
-          <span className="text-2xl font-bold text-purple-600">
+        <div className="flex justify-between items-center p-4 bg-gray-700 rounded-lg">
+          <span className="font-semibold text-gray-300">Our Prediction:</span>
+          <span className="text-2xl font-bold text-purple-400">
             {prediction?.toFixed(1) || 'N/A'}
           </span>
         </div>
 
-        <div className="flex justify-between items-center p-4 bg-gray-50 rounded-lg">
-          <span className="font-semibold text-gray-700">Sportsbook Line:</span>
-          <span className="text-2xl font-bold text-blue-600">
+        <div className="flex justify-between items-center p-4 bg-gray-700 rounded-lg">
+          <span className="font-semibold text-gray-300">Sportsbook Line:</span>
+          <span className="text-2xl font-bold text-blue-400">
             {betting_line?.toFixed(1) || 'N/A'}
           </span>
         </div>
 
         {difference && (
-          <div className="flex justify-between items-center p-4 bg-gray-50 rounded-lg">
-            <span className="font-semibold text-gray-700">Difference:</span>
+          <div className="flex justify-between items-center p-4 bg-gray-700 rounded-lg">
+            <span className="font-semibold text-gray-300">Difference:</span>
             <span className={`text-xl font-bold ${
-              parseFloat(difference) > 0 ? 'text-green-600' : 'text-red-600'
+              parseFloat(difference) > 0 ? 'text-green-400' : 'text-red-400'
             }`}>
               {parseFloat(difference) > 0 ? '+' : ''}{difference}
             </span>
@@ -58,30 +58,30 @@ function ComparisonBox({ comparisonData }) {
         )}
 
         <div className={`p-6 rounded-lg text-center ${
-          recDisplay.color === 'green' ? 'bg-green-50 border-2 border-green-500' :
-          recDisplay.color === 'red' ? 'bg-red-50 border-2 border-red-500' :
-          recDisplay.color === 'yellow' ? 'bg-yellow-50 border-2 border-yellow-500' :
-          'bg-gray-50 border-2 border-gray-500'
+          recDisplay.color === 'green' ? 'bg-green-900/30 border-2 border-green-500' :
+          recDisplay.color === 'red' ? 'bg-red-900/30 border-2 border-red-500' :
+          recDisplay.color === 'yellow' ? 'bg-yellow-900/30 border-2 border-yellow-500' :
+          'bg-gray-700 border-2 border-gray-500'
         }`}>
           <div className="text-4xl mb-2">{recDisplay.emoji}</div>
           <div className={`text-2xl font-bold ${
-            recDisplay.color === 'green' ? 'text-green-700' :
-            recDisplay.color === 'red' ? 'text-red-700' :
-            recDisplay.color === 'yellow' ? 'text-yellow-700' :
-            'text-gray-700'
+            recDisplay.color === 'green' ? 'text-green-400' :
+            recDisplay.color === 'red' ? 'text-red-400' :
+            recDisplay.color === 'yellow' ? 'text-yellow-400' :
+            'text-gray-300'
           }`}>
             {recDisplay.text}
           </div>
           {difference && (
-            <p className="text-sm text-gray-600 mt-2">
+            <p className="text-sm text-gray-400 mt-2">
               {Math.abs(parseFloat(difference)).toFixed(1)} points {parseFloat(difference) > 0 ? 'above' : 'below'} the line
             </p>
           )}
         </div>
       </div>
 
-      <div className="mt-6 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
-        <p className="text-xs text-yellow-800 text-center">
+      <div className="mt-6 p-4 bg-yellow-900/30 border border-yellow-700 rounded-lg">
+        <p className="text-xs text-yellow-300 text-center">
           ⚠️ Predictions are for entertainment purposes only. Always gamble responsibly.
         </p>
       </div>

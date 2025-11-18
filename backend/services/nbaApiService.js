@@ -218,12 +218,33 @@ export async function searchPlayersESPN(playerName) {
  * Get player stats directly from NBA.com API using player name
  * Returns stats in the same format as balldontlie service
  */
-export async function getPlayerStatsFromNBA(playerName) {
+export async function getPlayerStatsFromNBA(playerName, retryCount = 0) {
+  const maxRetries = 2;
+  
   try {
-    console.log(`📊 Fetching stats from NBA.com for: ${playerName}`);
+    console.log(`📊 Fetching stats from NBA.com for: ${playerName}${retryCount > 0 ? ` (retry ${retryCount}/${maxRetries})` : ''}`);
     
-    // Search for player
-    const nbaPlayer = await searchPlayer(playerName);
+    // Search for player with retry logic
+    let nbaPlayer = null;
+    let searchRetries = 0;
+    while (searchRetries <= maxRetries && !nbaPlayer) {
+      try {
+        nbaPlayer = await searchPlayer(playerName);
+        if (!nbaPlayer || !nbaPlayer.id) {
+          throw new Error(`Player "${playerName}" not found on NBA.com`);
+        }
+        break;
+      } catch (searchError) {
+        if (searchError.message.includes('timeout') && searchRetries < maxRetries) {
+          searchRetries++;
+          const backoffDelay = 2000 * searchRetries; // 2s, 4s
+          console.log(`   ⚠️  Search timeout (attempt ${searchRetries}/${maxRetries + 1}), retrying in ${backoffDelay}ms...`);
+          await new Promise(resolve => setTimeout(resolve, backoffDelay));
+          continue;
+        }
+        throw searchError;
+      }
+    }
     
     if (!nbaPlayer || !nbaPlayer.id) {
       throw new Error(`Player "${playerName}" not found on NBA.com`);
@@ -231,18 +252,37 @@ export async function getPlayerStatsFromNBA(playerName) {
     
     console.log(`✅ Found NBA.com player: ${nbaPlayer.name} (ID: ${nbaPlayer.id})`);
     
-    // Get game log
-    const games = await getPlayerGameLog(nbaPlayer.id, {
-      includePreviousSeason: true,
-      currentSeasonGames: 10,
-      previousSeasonGames: 20
-    });
+    // Get game log with retry logic
+    let games = null;
+    let gameLogRetries = 0;
+    while (gameLogRetries <= maxRetries && !games) {
+      try {
+        games = await getPlayerGameLog(nbaPlayer.id, {
+          includePreviousSeason: true,
+          currentSeasonGames: 10,
+          previousSeasonGames: 20
+        });
+        if (!games || games.length === 0) {
+          throw new Error(`No game data found for ${playerName}`);
+        }
+        break;
+      } catch (gameLogError) {
+        if (gameLogError.message.includes('timeout') && gameLogRetries < maxRetries) {
+          gameLogRetries++;
+          const backoffDelay = 2000 * gameLogRetries; // 2s, 4s
+          console.log(`   ⚠️  Game log timeout (attempt ${gameLogRetries}/${maxRetries + 1}), retrying in ${backoffDelay}ms...`);
+          await new Promise(resolve => setTimeout(resolve, backoffDelay));
+          continue;
+        }
+        throw gameLogError;
+      }
+    }
     
     if (!games || games.length === 0) {
       throw new Error(`No game data found for ${playerName}`);
     }
     
-    // Get player info for additional details
+    // Get player info for additional details (non-critical, don't retry)
     let playerInfo = null;
     try {
       playerInfo = await getPlayerInfo(nbaPlayer.id);
@@ -318,7 +358,7 @@ export async function searchPlayer(playerName) {
             IsOnlyCurrentSeason: 0
           },
           headers: NBA_HEADERS,
-          timeout: 20000, // Increased timeout
+          timeout: 30000, // Increased timeout to 30s for slow API responses
           validateStatus: (status) => status < 500 // Don't throw on 403/404
         });
         
@@ -454,7 +494,7 @@ export async function getPlayerGameLog(playerId, options = {}) {
         response = await axios.get(url, {
           params,
           headers: NBA_HEADERS,
-          timeout: 20000, // Increased timeout
+          timeout: 30000, // Increased timeout to 30s for slow API responses
           validateStatus: (status) => status < 500
         });
         
@@ -496,12 +536,24 @@ export async function getPlayerGameLog(playerId, options = {}) {
     const headers = gameLog.headers || [];
     const games = gameLog.rowSet || [];
     
-    // Find column indices
+    // Find column indices - NBA.com playergamelog has many columns
     const gameDateIndex = headers.indexOf('GAME_DATE');
     const matchupIndex = headers.indexOf('MATCHUP');
     const ptsIndex = headers.indexOf('PTS');
     const minIndex = headers.indexOf('MIN');
     const wlIndex = headers.indexOf('WL'); // Win/Loss
+    const rebIndex = headers.indexOf('REB');
+    const astIndex = headers.indexOf('AST');
+    const stlIndex = headers.indexOf('STL');
+    const blkIndex = headers.indexOf('BLK');
+    const fgmIndex = headers.indexOf('FGM'); // Field Goals Made
+    const fgaIndex = headers.indexOf('FGA'); // Field Goals Attempted
+    const ftmIndex = headers.indexOf('FTM'); // Free Throws Made
+    const ftaIndex = headers.indexOf('FTA'); // Free Throws Attempted
+    const fg3mIndex = headers.indexOf('FG3M'); // 3-Pointers Made
+    const fg3aIndex = headers.indexOf('FG3A'); // 3-Pointers Attempted
+    const tovIndex = headers.indexOf('TOV'); // Turnovers
+    const pfIndex = headers.indexOf('PF'); // Personal Fouls
     
     if (ptsIndex === -1) {
       throw new Error('Could not find PTS column in NBA.com response');
@@ -513,6 +565,18 @@ export async function getPlayerGameLog(playerId, options = {}) {
       const points = parseInt(game[ptsIndex]) || 0;
       const minutes = game[minIndex] || '0';
       const result = game[wlIndex] || '';
+      const rebounds = parseInt(game[rebIndex]) || 0;
+      const assists = parseInt(game[astIndex]) || 0;
+      const steals = parseInt(game[stlIndex]) || 0;
+      const blocks = parseInt(game[blkIndex]) || 0;
+      const field_goals_made = parseInt(game[fgmIndex]) || 0;
+      const field_goals_attempted = parseInt(game[fgaIndex]) || 0;
+      const free_throws_made = parseInt(game[ftmIndex]) || 0;
+      const free_throws_attempted = parseInt(game[ftaIndex]) || 0;
+      const three_pointers_made = parseInt(game[fg3mIndex]) || 0;
+      const three_pointers_attempted = parseInt(game[fg3aIndex]) || 0;
+      const turnovers = parseInt(game[tovIndex]) || 0;
+      const personal_fouls = parseInt(game[pfIndex]) || 0;
       
       // Parse opponent from matchup
       // NBA.com format: "GSW vs. LAL" (GSW is home) or "GSW @ LAL" (GSW is away)
@@ -573,6 +637,26 @@ export async function getPlayerGameLog(playerId, options = {}) {
         game_number: index + 1,
         date: formattedDate,
         points: points,
+        rebounds: rebounds,
+        assists: assists,
+        steals: steals,
+        blocks: blocks,
+        threes_made: three_pointers_made,
+        threes: three_pointers_made, // Alias for compatibility
+        field_goals_made: field_goals_made,
+        fgm: field_goals_made, // Alias
+        field_goals_attempted: field_goals_attempted,
+        fga: field_goals_attempted, // Alias
+        free_throws_made: free_throws_made,
+        ftm: free_throws_made, // Alias
+        free_throws_attempted: free_throws_attempted,
+        fta: free_throws_attempted, // Alias
+        three_pointers_made: three_pointers_made,
+        tpm: three_pointers_made, // Alias
+        three_pointers_attempted: three_pointers_attempted,
+        tpa: three_pointers_attempted, // Alias
+        turnovers: turnovers,
+        personal_fouls: personal_fouls,
         opponent: opponent,
         minutes: minutes,
         home: isHome,
@@ -796,6 +880,52 @@ function mapEspnToNbaAbbrev(espnAbbrev) {
 }
 
 /**
+ * Get team record from ESPN API
+ */
+export async function getTeamRecord(teamAbbrev) {
+  try {
+    if (!teamAbbrev || teamAbbrev === 'N/A') {
+      return null;
+    }
+    
+    const espnTeamId = getEspnTeamId(teamAbbrev);
+    if (!espnTeamId) {
+      return null;
+    }
+    
+    const teamUrl = `https://site.web.api.espn.com/apis/site/v2/sports/basketball/nba/teams/${espnTeamId}`;
+    const response = await axios.get(teamUrl, {
+      params: {
+        region: 'us',
+        lang: 'en',
+        contentorigin: 'espn'
+      },
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+        'Accept': 'application/json'
+      },
+      timeout: 10000
+    });
+    
+    if (response.data && response.data.team) {
+      const team = response.data.team;
+      const record = team.record;
+      if (record && record.items && record.items.length > 0) {
+        const seasonRecord = record.items[0];
+        const wins = seasonRecord.stats?.find(s => s.name === 'wins')?.value || 0;
+        const losses = seasonRecord.stats?.find(s => s.name === 'losses')?.value || 0;
+        return `${wins}-${losses}`;
+      }
+    }
+    
+    return null;
+  } catch (error) {
+    console.log(`⚠️ Could not fetch team record for ${teamAbbrev}: ${error.message}`);
+    return null;
+  }
+}
+
+/**
  * Get ESPN team ID from NBA team abbreviation
  * Note: ESPN uses different abbreviations for some teams (e.g., GS instead of GSW, UTAH instead of UTA)
  */
@@ -954,7 +1084,7 @@ export async function getPlayerInfo(playerId) {
         response = await axios.get(url, {
           params,
           headers: NBA_HEADERS,
-          timeout: 20000, // Increased timeout
+          timeout: 30000, // Increased timeout to 30s for slow API responses
           validateStatus: (status) => status < 500 // Don't throw on 403/404, handle it
         });
         

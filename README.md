@@ -247,6 +247,12 @@ PORT=5001                      # Optional, defaults to 5001
 - **Image Loading**: Instant (served from local storage)
 - **Homepage**: <500ms (cached player list)
 
+## 🔒 Security
+
+See [SECURITY.md](./SECURITY.md) for information about known vulnerabilities and security best practices.
+
+**Note**: There are 2 moderate severity vulnerabilities in dev dependencies (esbuild via vite). These only affect the development server and do not impact production builds. They can be addressed by upgrading to Vite 7 when ready.
+
 ## 🐛 Troubleshooting
 
 ### Common Issues

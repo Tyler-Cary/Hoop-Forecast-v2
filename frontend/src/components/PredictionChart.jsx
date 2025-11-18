@@ -1,206 +1,308 @@
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceLine, Cell } from 'recharts';
+import { useState } from 'react';
+import { motion } from 'framer-motion';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, Cell } from 'recharts';
 
-function PredictionChart({ stats, prediction }) {
+function PredictionChart({ stats, prediction, bettingLine, selectedProp }) {
+  const [filter, setFilter] = useState('L15'); // L5, L10, L15, H2H, 2025, 2024
+
   if (!stats || stats.length === 0) {
     return (
-      <div className="bg-white rounded-lg shadow-xl p-6">
-        <h3 className="text-2xl font-bold text-gray-800 mb-4">Recent Performance</h3>
-        <p className="text-gray-500 text-center py-8">No game data available</p>
+      <div className="bg-gray-800 rounded-lg shadow-xl p-6 border border-gray-700">
+        <h3 className="text-2xl font-bold text-white mb-4">Prop Analysis</h3>
+        <p className="text-gray-400 text-center py-8">No game data available</p>
       </div>
     );
   }
 
-  // Prepare chart data - stats come with Game 1 = most recent, Game 10 = oldest
-  // We want to display most recent on the right, so we reverse the order
-  const sortedStats = [...stats].sort((a, b) => (a.game_number || 0) - (b.game_number || 0));
-  // Reverse so most recent (Game 1) is on the right
-  const reversedStats = sortedStats.reverse();
-  
-  const chartData = reversedStats.map((game, index) => {
-    // Use opponent abbreviation, or fallback
-    const opponent = game.opponent && game.opponent !== 'N/A' ? game.opponent : `G${game.game_number || index + 1}`;
-    const points = typeof game.points === 'number' ? game.points : parseFloat(game.points) || 0;
-    
-    // Determine bar color based on prediction
-    let barColor = '#6b7280'; // Default gray
-    if (prediction != null) {
-      barColor = points >= prediction ? '#10b981' : '#ef4444'; // Green if over, red if under
+  // Get the line to use (betting line takes priority, then prediction)
+  const line = bettingLine != null ? bettingLine : (prediction != null ? prediction : null);
+
+  // Sort stats: most recent first
+  const sortedStats = [...stats].sort((a, b) => {
+    const dateA = new Date(a.date || 0);
+    const dateB = new Date(b.date || 0);
+    return dateB - dateA;
+  });
+
+  // Determine what stat to chart based on selected prop
+  const getChartValue = (game) => {
+    if (!selectedProp) {
+      return typeof game.points === 'number' ? game.points : parseFloat(game.points) || 0;
     }
     
+    switch (selectedProp) {
+      case 'points':
+        return typeof game.points === 'number' ? game.points : parseFloat(game.points) || 0;
+      case 'assists':
+        return typeof game.assists === 'number' ? game.assists : parseFloat(game.assists) || 0;
+      case 'rebounds':
+        return typeof game.rebounds === 'number' ? game.rebounds : parseFloat(game.rebounds) || 0;
+      case 'steals':
+        return typeof game.steals === 'number' ? game.steals : parseFloat(game.steals) || 0;
+      case 'blocks':
+        return typeof game.blocks === 'number' ? game.blocks : parseFloat(game.blocks) || 0;
+      case 'threes':
+        return typeof game.threes_made === 'number' ? game.threes_made : (typeof game.threes === 'number' ? game.threes : parseFloat(game.threes) || 0);
+      case 'points_rebounds':
+        return (game.points || 0) + (game.rebounds || 0);
+      case 'points_assists':
+        return (game.points || 0) + (game.assists || 0);
+      default:
+        return typeof game.points === 'number' ? game.points : parseFloat(game.points) || 0;
+    }
+  };
+
+  // Filter stats based on selected filter
+  let filteredStats = sortedStats;
+  if (filter === 'L5') {
+    filteredStats = sortedStats.slice(0, 5);
+  } else if (filter === 'L10') {
+    filteredStats = sortedStats.slice(0, 10);
+  } else if (filter === 'L15') {
+    filteredStats = sortedStats.slice(0, 15);
+  } else if (filter === '2025') {
+    filteredStats = sortedStats.filter(game => {
+      // First try to use the season field if available
+      if (game.season) {
+        // 2025 filter = 2025-26 season (current season)
+        return game.season === '2025-26' || game.season.includes('2025-26');
+      }
+      // Fallback to date parsing - games from 2025 calendar year
+      try {
+        const date = new Date(game.date);
+        return date.getFullYear() === 2025;
+      } catch {
+        return true;
+      }
+    });
+  } else if (filter === '2024') {
+    filteredStats = sortedStats.filter(game => {
+      // First try to use the season field if available
+      if (game.season) {
+        // 2024 filter = 2024-25 season (previous season)
+        return game.season === '2024-25' || game.season.includes('2024-25');
+      }
+      // Fallback to date parsing - games from 2024 calendar year
+      try {
+        const date = new Date(game.date);
+        return date.getFullYear() === 2024;
+      } catch {
+        return true;
+      }
+    });
+  }
+  // H2H would need opponent info, skipping for now
+
+  // Reverse so oldest is on left, newest on right
+  const chartData = [...filteredStats].reverse().map((game, index) => {
+    const value = getChartValue(game);
+    
+    // Determine bar color based on line
+    let barColor = '#6b7280'; // Default gray
+    if (line != null) {
+      barColor = value >= line ? '#10b981' : '#ef4444'; // Green if over, red if under
+    }
+    
+    // Format date for label (format: M/D/YY)
+    let dateLabel = '';
+    try {
+      if (game.date) {
+        const dateObj = new Date(game.date);
+        if (!isNaN(dateObj.getTime())) {
+          const month = dateObj.getMonth() + 1;
+          const day = dateObj.getDate();
+          const year = dateObj.getFullYear().toString().slice(-2);
+          dateLabel = `${month}/${day}/${year}`;
+        }
+      }
+    } catch (e) {
+      dateLabel = '';
+    }
+    
+    const opponent = game.opponent || 'N/A';
+    const isAway = game.home === false;
+    const opponentLabel = isAway ? `@${opponent}` : opponent;
+    
     return {
-      name: opponent, // This will be the X-axis label
-      gameNumber: game.game_number || index + 1,
-      points: points,
-      date: game.date?.split('T')[0] || '',
-      opponent: game.opponent || 'N/A',
-      fullLabel: `${opponent} (${game.points} pts)`,
-      color: barColor
+      name: `${opponentLabel} ${dateLabel}`,
+      points: value,
+      date: dateLabel,
+      opponent: opponentLabel,
+      color: barColor,
+      isOver: line != null && value >= line
     };
   });
 
-  // Calculate Y-axis domain with padding, rounded to multiples of 5
-  const allPoints = chartData.map(d => d.points);
-  if (prediction != null) {
-    allPoints.push(prediction);
+  // Calculate over/under stats
+  const overCount = chartData.filter(d => d.isOver).length;
+  const underCount = chartData.length - overCount;
+  const dominantResult = overCount > underCount ? 'Over' : 'Under';
+  const dominantCount = Math.max(overCount, underCount);
+
+  // Calculate Y-axis domain
+  const allValues = chartData.map(d => d.points);
+  if (line != null) {
+    allValues.push(line);
   }
-  const rawMin = Math.min(...allPoints);
-  const rawMax = Math.max(...allPoints);
+  const rawMin = Math.min(...allValues, 0);
+  const rawMax = Math.max(...allValues);
   
-  // Round min down to nearest multiple of 5, but not below 0
   const minPoints = Math.max(0, Math.floor((rawMin - 5) / 5) * 5);
-  // Round max up to nearest multiple of 5
   const maxPoints = Math.ceil((rawMax + 5) / 5) * 5;
   
-  // Generate Y-axis ticks in multiples of 5, but only show relevant ones
-  const tickInterval = Math.ceil((maxPoints - minPoints) / 8); // Aim for ~8 ticks
-  const roundedInterval = Math.ceil(tickInterval / 5) * 5; // Round to nearest multiple of 5
+  // Generate Y-axis ticks
   const yAxisTicks = [];
-  for (let i = minPoints; i <= maxPoints; i += roundedInterval) {
+  const tickInterval = Math.max(5, Math.ceil((maxPoints - minPoints) / 6));
+  for (let i = minPoints; i <= maxPoints; i += tickInterval) {
     yAxisTicks.push(i);
+  }
+  if (yAxisTicks[yAxisTicks.length - 1] < maxPoints) {
+    yAxisTicks.push(maxPoints);
   }
 
   return (
-    <div className="bg-white rounded-lg shadow-xl p-8 border border-gray-100">
-      <h3 className="text-2xl font-bold text-gray-800 mb-2">
-        Points Trend & Prediction
-      </h3>
-      <p className="text-sm text-gray-500 mb-6">Performance vs. Predicted Points</p>
+    <motion.div 
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.3 }}
+      className="bg-gray-800 rounded-lg shadow-xl p-6 border border-gray-700"
+    >
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <h3 className="text-2xl font-bold text-white mb-2">Prop Analysis</h3>
+          {line != null && chartData.length > 0 && (
+            <motion.p 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ delay: 0.2 }}
+              className="text-sm text-gray-400"
+            >
+              The <span className="font-semibold text-white">{dominantResult}</span> hit <span className="font-semibold text-white">{dominantCount}/{chartData.length}</span> in the last {chartData.length} games at a line of <span className="font-semibold text-white">{line.toFixed(1)}</span>
+            </motion.p>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          {['L5', 'L10', 'L15', 'H2H', '2025', '2024'].map((f) => (
+            <motion.button
+              key={f}
+              onClick={() => setFilter(f)}
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              className={`px-3 py-1.5 rounded text-sm font-medium transition-all duration-200 ${
+                filter === f
+                  ? 'bg-yellow-500 text-gray-900 font-semibold shadow-lg'
+                  : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+              }`}
+            >
+              {f}
+            </motion.button>
+          ))}
+          <motion.button 
+            whileHover={{ scale: 1.1, rotate: 90 }}
+            whileTap={{ scale: 0.9 }}
+            className="p-1.5 rounded bg-gray-700 text-gray-300 hover:bg-gray-600 transition-colors"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
+          </motion.button>
+        </div>
+      </div>
       
-      <ResponsiveContainer width="100%" height={500}>
+      <ResponsiveContainer width="100%" height={400}>
         <BarChart 
           data={chartData}
-          margin={{ top: 20, right: 30, left: 40, bottom: 70 }}
-          barCategoryGap="15%"
+          margin={{ top: 20, right: 50, left: 20, bottom: 60 }}
+          barCategoryGap="10%"
         >
-          <defs>
-            <linearGradient id="greenGradient" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#10b981" stopOpacity={0.9}/>
-              <stop offset="100%" stopColor="#059669" stopOpacity={0.8}/>
-            </linearGradient>
-            <linearGradient id="redGradient" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#ef4444" stopOpacity={0.9}/>
-              <stop offset="100%" stopColor="#dc2626" stopOpacity={0.8}/>
-            </linearGradient>
-          </defs>
-          <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" vertical={false} />
+          <CartesianGrid strokeDasharray="3 3" stroke="#4b5563" vertical={false} opacity={0.3} />
           <XAxis 
             dataKey="name"
             angle={-45}
             textAnchor="end"
             height={80}
             stroke="#9ca3af"
-            tick={{ fill: '#6b7280', fontSize: 11, fontWeight: 500 }}
-            tickLine={{ stroke: '#d1d5db' }}
+            tick={{ fill: '#9ca3af', fontSize: 11, fontWeight: 500, fontFamily: 'Poppins' }}
+            tickLine={{ stroke: '#6b7280' }}
           />
           <YAxis 
             domain={[minPoints, maxPoints]}
-            label={{ value: 'Points', angle: -90, position: 'insideLeft', style: { textAnchor: 'middle', fill: '#374151', fontSize: 13, fontWeight: 700 } }}
-            stroke="#6b7280"
-            strokeWidth={2}
-            tick={{ fill: '#374151', fontSize: 12, fontWeight: 600 }}
-            tickLine={{ stroke: '#6b7280', strokeWidth: 1.5 }}
-            width={50}
+            stroke="#9ca3af"
+            strokeWidth={1}
+            tick={{ fill: '#d1d5db', fontSize: 12, fontWeight: 500, fontFamily: 'Poppins' }}
+            tickLine={{ stroke: '#6b7280' }}
+            width={40}
             ticks={yAxisTicks}
           />
           <Tooltip 
             contentStyle={{
-              backgroundColor: '#fff',
-              border: '1px solid #e5e7eb',
-              borderRadius: '12px',
-              padding: '12px',
-              boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05)',
-              fontSize: '13px'
+              backgroundColor: '#1f2937',
+              border: '1px solid #374151',
+              borderRadius: '8px',
+              padding: '10px',
+              fontFamily: 'Poppins'
             }}
-            cursor={{ fill: 'rgba(0, 0, 0, 0.05)' }}
-            formatter={(value, name, props) => {
-              if (name === 'Prediction') {
-                return [`${value.toFixed(1)} pts (Predicted)`, 'Prediction'];
-              }
-              const opponent = props.payload.opponent || 'N/A';
-              const status = prediction != null && value >= prediction ? 'Over' : 'Under';
-              const statusColor = prediction != null && value >= prediction ? '#10b981' : '#ef4444';
-              return [
-                <span key="value">
-                  <span style={{ fontWeight: 600 }}>{value}</span> pts vs {opponent} 
-                  <span style={{ color: statusColor, fontWeight: 600, marginLeft: '6px' }}>({status})</span>
-                </span>, 
-                'Points Scored'
-              ];
+            cursor={{ fill: 'rgba(255, 255, 255, 0.05)' }}
+            formatter={(value) => {
+              const propLabel = selectedProp === 'points' ? 'pts' :
+                               selectedProp === 'assists' ? 'ast' :
+                               selectedProp === 'rebounds' ? 'reb' :
+                               selectedProp === 'steals' ? 'stl' :
+                               selectedProp === 'blocks' ? 'blk' :
+                               selectedProp === 'threes' ? '3pm' :
+                               selectedProp === 'points_rebounds' ? 'pts+reb' :
+                               selectedProp === 'points_assists' ? 'pts+ast' : 'value';
+              return [`${value.toFixed(1)} ${propLabel}`, 'Value'];
             }}
-            labelFormatter={(label, payload) => {
-              if (payload && payload[0]) {
-                const date = payload[0].payload.date;
-                return <span style={{ fontWeight: 600, fontSize: '14px' }}>{date ? `${label} - ${date}` : label}</span>;
-              }
-              return label;
-            }}
+            labelFormatter={(label) => <span style={{ fontWeight: 600, fontSize: '13px' }}>{label}</span>}
           />
           
-          {/* Historical games bars */}
+          {/* Bars */}
           <Bar 
             dataKey="points" 
-            name="Points Scored"
             radius={[4, 4, 0, 0]}
           >
             {chartData.map((entry, index) => (
               <Cell 
                 key={`cell-${index}`} 
-                fill={entry.color === '#10b981' ? 'url(#greenGradient)' : entry.color === '#ef4444' ? 'url(#redGradient)' : entry.color}
+                fill={entry.color}
                 stroke={entry.color}
-                strokeWidth={1.5}
+                strokeWidth={0}
+                opacity={0.9}
               />
             ))}
           </Bar>
           
-          {/* Prediction reference line - purple dotted line */}
-          {prediction != null && (
+          {/* Reference line at betting line - white line like reference */}
+          {line != null && (
             <ReferenceLine 
-              y={prediction} 
-              stroke="#a855f7" 
-              strokeWidth={2.5}
-              strokeDasharray="8 4"
-              label={{ 
-                value: `Predicted: ${prediction.toFixed(1)} pts`, 
-                position: "top", 
-                offset: 10,
-                fill: '#7c3aed', 
-                fontSize: 13,
-                fontWeight: 'bold',
-                backgroundColor: '#fff',
-                padding: '5px 10px',
-                borderRadius: '6px',
-                boxShadow: '0 2px 6px rgba(0, 0, 0, 0.2)',
-                border: '2px solid #a855f7'
+              y={line} 
+              stroke="#ffffff" 
+              strokeWidth={2}
+              strokeDasharray="0"
+              label={({ viewBox }) => {
+                // Position label above the line on the right side
+                const labelY = viewBox.y - 12; // Position 12px above the line
+                return (
+                  <text
+                    x={viewBox.width - 10}
+                    y={labelY}
+                    fill="#ffffff"
+                    fontSize={11}
+                    fontWeight={600}
+                    fontFamily="Poppins"
+                    textAnchor="end"
+                  >
+                    {line.toFixed(1)}
+                  </text>
+                );
               }}
             />
           )}
         </BarChart>
       </ResponsiveContainer>
-
-      <div className="mt-8 pt-6 border-t border-gray-200 flex flex-wrap items-center justify-between gap-4 text-sm">
-        <p className="text-gray-500 font-medium">
-          Showing last {stats.length} games with prediction comparison
-        </p>
-        {prediction != null && (
-          <div className="flex flex-wrap items-center gap-6">
-            <div className="flex items-center gap-2">
-              <div className="w-5 h-5 bg-gradient-to-br from-green-500 to-green-600 rounded shadow-sm"></div>
-              <span className="text-gray-700 font-medium">Over Prediction</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <div className="w-5 h-5 bg-gradient-to-br from-red-500 to-red-600 rounded shadow-sm"></div>
-              <span className="text-gray-700 font-medium">Under Prediction</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <div className="w-6 h-0.5 bg-purple-500 border-dashed border-2 border-purple-500"></div>
-              <span className="text-gray-700 font-medium">Predicted: <span className="font-bold text-purple-600">{prediction.toFixed(1)} pts</span></span>
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
+    </motion.div>
   );
 }
 
 export default PredictionChart;
-

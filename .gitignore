@@ -45,6 +45,7 @@ frontend/.vite/
 
 # Cache and data
 backend/data/cache/
+backend/data/predictions.json
 *.db
 *.sqlite
 *.sqlite3

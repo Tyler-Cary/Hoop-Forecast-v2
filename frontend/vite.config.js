@@ -8,11 +8,16 @@ export default defineConfig({
     proxy: {
       '/api': {
         target: 'http://localhost:5001',
-        changeOrigin: true
+        changeOrigin: true,
+        secure: false,
+        timeout: 30000,
+        retry: 3
       },
       '/images': {
         target: 'http://localhost:5001',
-        changeOrigin: true
+        changeOrigin: true,
+        secure: false,
+        timeout: 10000
       }
     }
   }

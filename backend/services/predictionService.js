@@ -1,20 +1,28 @@
 import pkg from 'ml-regression';
 import OpenAI from 'openai';
 import dotenv from 'dotenv';
+import { storePrediction } from './predictionTrackingService.js';
 
 dotenv.config();
 
 // ml-regression uses SimpleLinearRegression, not LinearRegression
 const { SimpleLinearRegression } = pkg;
 
-// Initialize OpenAI client
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-if (!OPENAI_API_KEY) {
-  throw new Error('OPENAI_API_KEY environment variable is required');
+// Initialize OpenAI client (lazy initialization)
+let openai = null;
+
+function getOpenAIClient() {
+  if (!openai) {
+    const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+    if (!OPENAI_API_KEY) {
+      throw new Error('OPENAI_API_KEY environment variable is required. Please set it in your .env file.');
+    }
+    openai = new OpenAI({
+      apiKey: OPENAI_API_KEY
+    });
+  }
+  return openai;
 }
-const openai = new OpenAI({
-  apiKey: OPENAI_API_KEY
-});
 
 /**
  * Predict next game points using linear regression
@@ -180,8 +188,11 @@ export async function predictPoints(playerId) {
 
 /**
  * Predict points from games array using ChatGPT
+ * @param {array} games - Array of game data
+ * @param {string} playerName - Player name
+ * @param {object} nextGameInfo - Optional info about next game (for tracking)
  */
-export async function predictPointsFromGames(games, playerName) {
+export async function predictPointsFromGames(games, playerName, nextGameInfo = null) {
   if (!games || games.length < 3) {
     throw new Error(`Insufficient game data for prediction. Need at least 3 games, got ${games?.length || 0}.`);
   }
@@ -302,41 +313,146 @@ export async function predictPointsFromGames(games, playerName) {
       (1 - normalizedStd) * 20
     ));
 
+    // Calculate additional metrics for better predictions
+    // Parse minutes (NBA format is typically "MM:SS" or just a number)
+    const parseMinutes = (mins) => {
+      if (!mins || mins === '0' || mins === 0) return null;
+      if (typeof mins === 'number') return mins;
+      if (typeof mins === 'string') {
+        // Handle "MM:SS" format (e.g., "35:24" = 35.4 minutes)
+        if (mins.includes(':')) {
+          const parts = mins.split(':');
+          const minutes = parseInt(parts[0]) || 0;
+          const seconds = parseInt(parts[1]) || 0;
+          return minutes + (seconds / 60);
+        }
+        // Handle decimal format
+        const parsed = parseFloat(mins);
+        return isNaN(parsed) ? null : parsed;
+      }
+      return null;
+    };
+    
+    const minutesData = gameData.map(g => parseMinutes(g.minutes)).filter(m => m !== null);
+    const avgMinutes = minutesData.length > 0
+      ? minutesData.reduce((sum, mins) => sum + mins, 0) / minutesData.length
+      : null;
+    
+    const pointsPerMinute = avgMinutes && avgMinutes > 0 ? avgPoints / avgMinutes : null;
+    
+    // Calculate opponent-specific averages (if we have enough data)
+    const opponentStats = {};
+    gameData.forEach(game => {
+      if (game.opponent && game.opponent !== 'Unknown' && game.opponent !== 'N/A') {
+        if (!opponentStats[game.opponent]) {
+          opponentStats[game.opponent] = { games: 0, totalPoints: 0 };
+        }
+        opponentStats[game.opponent].games += 1;
+        opponentStats[game.opponent].totalPoints += game.points;
+      }
+    });
+    
+    const opponentAverages = Object.entries(opponentStats)
+      .filter(([_, stats]) => stats.games >= 2)
+      .map(([opp, stats]) => `${opp}: ${(stats.totalPoints / stats.games).toFixed(1)} (${stats.games} games)`)
+      .join(', ');
+    
+    // Calculate streak analysis (last 3 games)
+    const last3Games = pointsArray.slice(-3);
+    let streakStatus = 'neutral';
+    if (last3Games.length >= 3) {
+      const isIncreasing = last3Games[0] < last3Games[1] && last3Games[1] < last3Games[2];
+      const isDecreasing = last3Games[0] > last3Games[1] && last3Games[1] > last3Games[2];
+      const allAboveAvg = last3Games.every(pts => pts > recent3Avg);
+      const allBelowAvg = last3Games.every(pts => pts < recent3Avg);
+      
+      if ((isIncreasing || allAboveAvg) && last3Games[2] > recent3Avg + 2) {
+        streakStatus = 'hot';
+      } else if ((isDecreasing || allBelowAvg) && last3Games[2] < recent3Avg - 2) {
+        streakStatus = 'cold';
+      }
+    }
+    
+    // Calculate coefficient of variation (CV) for consistency
+    const coefficientOfVariation = avgPoints > 0 ? (stdDev / avgPoints) * 100 : 0;
+
     const gameLogText = gameData.map(g => {
-      const minutesText = g.minutes ? `, ${g.minutes} min` : '';
+      const minutesText = g.minutes && g.minutes !== '0' && g.minutes !== 0 ? `, ${g.minutes} min` : '';
       return `Game ${g.sequence}: ${g.points} pts vs ${g.opponent} on ${g.date} (${g.location}${minutesText})`;
     }).join('\n');
 
-    const prompt = `You are an expert NBA data scientist tasked with projecting the next game points for ${playerName}.
+    const prompt = `You are an expert NBA data scientist and sports analytics professional with deep knowledge of player performance patterns, regression to the mean, and statistical modeling. Your task is to project the next game points for ${playerName} using a sophisticated weighted model.
 
-Complete game log (oldest to newest):
+=== COMPLETE GAME LOG (chronological, oldest to newest) ===
 ${gameLogText}
 
-Aggregated indicators derived from the log:
-- Overall average: ${avgPoints.toFixed(2)}
-- Recent 5-game average: ${recent5Avg.toFixed(2)}
-- Recent 3-game average: ${recent3Avg.toFixed(2)}
-- Momentum (recent3 - recent5): ${momentum.toFixed(2)}
-- Standard deviation: ${stdDev.toFixed(2)}
-- Consistency factor (1 = very consistent): ${(1 - normalizedStd).toFixed(2)}
-- Trend delta (second half avg minus first half avg): ${trendDelta.toFixed(2)} (${trend})
-- Home average (${homeGames.length} games): ${homeAvg.toFixed(2)}
-- Away average (${awayGames.length} games): ${awayAvg.toFixed(2)}
-- Home vs away difference: ${homeAwayDiff.toFixed(2)}
-- Highest points: ${maxPoints}
-- Lowest points: ${minPoints}
+=== AGGREGATED STATISTICAL INDICATORS ===
+Performance Metrics:
+- Overall average: ${avgPoints.toFixed(2)} points
+- Recent 5-game average: ${recent5Avg.toFixed(2)} points
+- Recent 3-game average: ${recent3Avg.toFixed(2)} points
+- Momentum indicator (recent3 - recent5): ${momentum.toFixed(2)} ${momentum > 0 ? '(trending up)' : momentum < 0 ? '(trending down)' : '(stable)'}
+- Current streak status: ${streakStatus}
 
-Season summaries:
-${seasonSummariesText || '- No season breakdown available'}
+Variability & Consistency:
+- Standard deviation: ${stdDev.toFixed(2)} points
+- Coefficient of variation: ${coefficientOfVariation.toFixed(1)}% ${coefficientOfVariation < 15 ? '(very consistent)' : coefficientOfVariation < 25 ? '(moderately consistent)' : '(highly variable)'}
+- Consistency score: ${(1 - normalizedStd).toFixed(2)} (1.0 = perfectly consistent)
+- Range: ${minPoints} to ${maxPoints} points (span: ${(maxPoints - minPoints).toFixed(1)})
 
-Fit a weighted projection model that leverages the complete data set, including recent form, overall production, trend, consistency, and home/away splits.
+Trend Analysis:
+- First half of games average: ${firstHalfAvg.toFixed(2)} points
+- Second half of games average: ${secondHalfAvg.toFixed(2)} points
+- Trend delta: ${trendDelta.toFixed(2)} points (${trend} trend)
 
-Return ONLY valid JSON with this exact structure (numbers must be numeric values, not strings):
+Location Splits:
+- Home average: ${homeAvg.toFixed(2)} points (${homeGames.length} games)
+- Away average: ${awayAvg.toFixed(2)} points (${awayGames.length} games)
+- Home/away differential: ${homeAwayDiff.toFixed(2)} points ${Math.abs(homeAwayDiff) > 2 ? '(significant)' : '(minimal)'}
+
+${avgMinutes ? `Efficiency Metrics:
+- Average minutes per game: ${avgMinutes.toFixed(1)} min
+- Points per minute: ${pointsPerMinute ? pointsPerMinute.toFixed(3) : 'N/A'}` : ''}
+
+${opponentAverages ? `Opponent-Specific Performance:
+- ${opponentAverages}` : ''}
+
+=== SEASON BREAKDOWN ===
+${seasonSummariesText || 'No season breakdown available'}
+
+=== PREDICTION INSTRUCTIONS ===
+1. **Primary Factors** (weight these most heavily):
+   - Recent form (last 3-5 games) - most predictive of immediate future performance
+   - Overall average - baseline expectation, accounts for regression to the mean
+   - Trend direction - whether performance is improving or declining
+
+2. **Secondary Factors**:
+   - Consistency/variance - more consistent players are more predictable
+   - Home/away splits - if significant (>2 pts difference), adjust accordingly
+   - Streak status - hot streaks may continue briefly, cold streaks may regress upward
+
+3. **Modeling Principles**:
+   - Apply regression to the mean: extreme recent performances should be tempered toward the overall average
+   - Weight recent games more heavily (exponential decay: most recent = highest weight)
+   - Consider the player's typical range: predictions should rarely exceed max or fall below min unless strong trend suggests otherwise
+   - Account for variance: higher std dev = wider error margin and lower confidence
+   - NBA context: typical scoring ranges are 0-50+ points, with most players in 10-30 range
+
+4. **Confidence Calculation**:
+   - Base confidence on: sample size (more games = higher), consistency (lower variance = higher), and data quality
+   - Typical confidence: 60-85% for established players with consistent data, 40-60% for limited or volatile data
+
+5. **Error Margin**:
+   - Should represent approximately one standard deviation of expected outcomes
+   - Higher variance players need wider margins
+   - Consider recent volatility vs. historical volatility
+
+Return ONLY valid JSON with this exact structure (all numbers must be numeric, not strings):
 {
   "prediction": {
     "predicted_points": number,
-    "confidence": number, // 0-100
-    "error_margin": number, // expected +/- range (one standard deviation)
+    "confidence": number,
+    "error_margin": number,
     "justification": string
   },
   "model": {
@@ -352,38 +468,89 @@ Return ONLY valid JSON with this exact structure (numbers must be numeric values
   }
 }
 
-Ensure the predicted_points reflects the weighted combination you derive from the factors plus the bias.`;
+CRITICAL: 
+- The predicted_points must be a realistic number based on the weighted combination of factors
+- Ensure it falls within a reasonable range given the player's historical performance (typically between min and max, or slightly outside if strong trend suggests)
+- Keep the justification field BRIEF (2-3 sentences maximum) - do not repeat information
+- Return ONLY the JSON object, no additional text before or after`;
 
     console.log('📤 Sending full game history to ChatGPT...');
 
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
+    const completion = await getOpenAIClient().chat.completions.create({
+      model: "gpt-4o-mini", // Using base model - fine-tuned model needs more training data
       messages: [
         {
           role: "system",
-          content: "You are an expert NBA data scientist. Always respond with valid JSON following the specified schema."
+          content: "You are an expert NBA data scientist and sports analytics professional specializing in player performance prediction. You excel at statistical modeling, regression analysis, and identifying performance patterns. Always respond with valid, well-structured JSON following the exact specified schema. Your predictions are data-driven and account for regression to the mean, variance, and contextual factors."
         },
         {
           role: "user",
           content: prompt
         }
       ],
-      temperature: 0.2,
-      max_tokens: 350
+      temperature: 0.1, // Lower temperature for more consistent, deterministic predictions
+      max_tokens: 600, // Increased to allow for more detailed analysis and justification
+      response_format: { type: "json_object" } // Force JSON output for better reliability
     });
 
     const responseText = completion.choices[0].message.content.trim();
-    console.log(`📥 ChatGPT model response: "${responseText}"`);
+    console.log(`📥 ChatGPT model response: "${responseText.substring(0, 200)}..."`);
 
     let modelResult;
     try {
       modelResult = JSON.parse(responseText);
     } catch (parseError) {
-      const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+      // Try to extract valid JSON even if truncated
+      // Look for the JSON object and try to fix incomplete strings
+      let jsonText = responseText;
+      
+      // If the JSON appears to be truncated (ends with incomplete string), try to fix it
+      if (jsonText.includes('"justification"') && !jsonText.trim().endsWith('}')) {
+        // Find the last complete field before truncation
+        const justificationMatch = jsonText.match(/"justification"\s*:\s*"([^"]*)/);
+        if (justificationMatch) {
+          // Truncate at the last complete quote and close the JSON properly
+          const lastCompleteQuote = jsonText.lastIndexOf('"');
+          if (lastCompleteQuote > 0) {
+            // Find the start of the justification value
+            const justificationStart = jsonText.indexOf('"justification"');
+            const valueStart = jsonText.indexOf('"', justificationStart + '"justification"'.length) + 1;
+            // Keep only up to the last complete quote, then close properly
+            jsonText = jsonText.substring(0, valueStart) + 
+                      jsonText.substring(valueStart, lastCompleteQuote).replace(/[^"]*$/, '') + 
+                      '"' + 
+                      jsonText.substring(lastCompleteQuote + 1).replace(/[^}]*$/, '') + 
+                      '}}';
+          }
+        }
+      }
+      
+      // Try to extract JSON object
+      const jsonMatch = jsonText.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
-        modelResult = JSON.parse(jsonMatch[0]);
+        try {
+          modelResult = JSON.parse(jsonMatch[0]);
+        } catch (e) {
+          // If still failing, try to extract just the essential fields
+          const pointsMatch = jsonText.match(/"predicted_points"\s*:\s*([0-9.]+)/);
+          const confidenceMatch = jsonText.match(/"confidence"\s*:\s*([0-9.]+)/);
+          const errorMarginMatch = jsonText.match(/"error_margin"\s*:\s*([0-9.]+)/);
+          
+          if (pointsMatch) {
+            modelResult = {
+              prediction: {
+                predicted_points: parseFloat(pointsMatch[1]),
+                confidence: confidenceMatch ? parseFloat(confidenceMatch[1]) : undefined,
+                error_margin: errorMarginMatch ? parseFloat(errorMarginMatch[1]) : undefined,
+                justification: "Response was truncated, but core prediction extracted."
+              }
+            };
+          } else {
+            throw new Error(`Failed to parse ChatGPT response as JSON: ${responseText.substring(0, 500)}`);
+          }
+        }
       } else {
-        throw new Error(`Failed to parse ChatGPT response as JSON: ${responseText}`);
+        throw new Error(`Failed to parse ChatGPT response as JSON: ${responseText.substring(0, 500)}`);
       }
     }
 
@@ -462,7 +629,7 @@ Ensure the predicted_points reflects the weighted combination you derive from th
       stats.weights = modelResult.model.weights;
     }
 
-    return {
+    const predictionResult = {
       player: playerName || 'Player',
       predicted_points: Math.max(0, Math.round(predictedPoints * 10) / 10),
       confidence: Math.round(confidence * 10) / 10,
@@ -471,6 +638,18 @@ Ensure the predicted_points reflects the weighted combination you derive from th
       method: 'chatgpt_model',
       stats
     };
+    
+    // Store prediction for tracking (if next game info is available)
+    if (nextGameInfo && nextGameInfo.date) {
+      try {
+        storePrediction(playerName, predictionResult, games, nextGameInfo);
+      } catch (trackError) {
+        console.warn('⚠️ Failed to store prediction for tracking:', trackError.message);
+        // Don't fail the prediction if tracking fails
+      }
+    }
+    
+    return predictionResult;
   } catch (error) {
     console.error('❌ ChatGPT prediction failed:', error);
     throw new Error(`ChatGPT prediction failed: ${error.message}`);
