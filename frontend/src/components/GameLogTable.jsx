@@ -1,14 +1,20 @@
 import { useState } from 'react';
+import { motion } from 'framer-motion';
 
-function GameLogTable({ stats, selectedProp, prediction, bettingLine }) {
+function GameLogTable({ stats, selectedProp, prediction, bettingLine, nextGameOpponent }) {
   const [seasonFilter, setSeasonFilter] = useState('2025 Season');
 
   if (!stats || stats.length === 0) {
     return (
-      <div className="bg-gray-800 rounded-lg shadow-xl p-6 border border-gray-700">
+      <motion.div 
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.2 }}
+        className="bg-gray-800 rounded-lg shadow-xl p-6 border border-gray-700"
+      >
         <h3 className="text-xl font-bold text-white mb-4">Player Game Log</h3>
         <p className="text-gray-400 text-center py-8">No game data available</p>
-      </div>
+      </motion.div>
     );
   }
 
@@ -23,9 +29,49 @@ function GameLogTable({ stats, selectedProp, prediction, bettingLine }) {
     return dateB - dateA;
   });
 
-  // Filter by season if needed - use season field if available, otherwise use date
+  // Filter by season or H2H - use season field if available, otherwise use date
   let filteredStats = sortedStats;
-  if (seasonFilter === '2025 Season') {
+  if (seasonFilter === 'H2H') {
+    // Filter to only show games against the next opponent (ALL historical games, no season filter)
+    if (nextGameOpponent) {
+      filteredStats = sortedStats.filter(game => {
+        if (!game.opponent) return false;
+        
+        // Normalize opponent names for comparison (handle various formats)
+        const normalizeOpponent = (opp) => {
+          if (!opp) return '';
+          // Remove @ symbol if present, convert to uppercase, trim
+          // Also handle cases where opponent might be stored as "LAL" or "@LAL" or "LAL 123-456"
+          let normalized = opp.toString().replace(/^@/, '').toUpperCase().trim();
+          // Extract just the team abbreviation (first 2-3 characters, usually 3)
+          // This handles cases like "LAL 123-456" -> "LAL"
+          const match = normalized.match(/^([A-Z]{2,3})\b/);
+          if (match) {
+            normalized = match[1];
+          }
+          return normalized;
+        };
+        const gameOpponent = normalizeOpponent(game.opponent);
+        const nextOpponent = normalizeOpponent(nextGameOpponent);
+        
+        // Debug logging for first few matches
+        if (filteredStats.length < 3 && gameOpponent === nextOpponent) {
+          console.log(`✅ H2H Match: "${game.opponent}" (normalized: "${gameOpponent}") matches "${nextGameOpponent}" (normalized: "${nextOpponent}")`);
+        }
+        
+        return gameOpponent === nextOpponent;
+      });
+      // Sort by date (most recent first) for H2H
+      filteredStats = filteredStats.sort((a, b) => {
+        const dateA = new Date(a.date || 0);
+        const dateB = new Date(b.date || 0);
+        return dateB - dateA;
+      });
+    } else {
+      // If no next opponent, show no games for H2H
+      filteredStats = [];
+    }
+  } else if (seasonFilter === '2025 Season') {
     filteredStats = sortedStats.filter(game => {
       // First try to use the season field if available
       if (game.season) {
@@ -158,26 +204,72 @@ function GameLogTable({ stats, selectedProp, prediction, bettingLine }) {
   };
 
   const formatScore = (game) => {
-    // Try to get score from game data
-    if (game.result) {
-      return game.result; // e.g., "W 129-111" or "L 129-111"
+    const result =
+      game?.result ||
+      game?.win_loss ||
+      game?.wl ||
+      game?.game_result ||
+      null;
+    
+    if (result) {
+      return result; // e.g., "W" or "L" (NBA API only provides win/loss flag)
     }
+    
+    // Fallback: show matchup context instead of N/A
+    if (typeof game.home === 'boolean' && game.opponent) {
+      return `${game.home ? 'vs' : '@'} ${game.opponent}`;
+    }
+    
     return 'N/A';
   };
 
-  const formatSpreadResult = (game) => {
-    // This would need spread data from the API
-    return 'N/A';
-  };
+
+  // Show empty state for H2H if no games found
+  if (seasonFilter === 'H2H' && nextGameOpponent && filteredStats.length === 0) {
+    return (
+      <div className="bg-gray-800 rounded-lg shadow-xl p-6 border border-gray-700">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h3 className="text-xl font-bold text-white mb-1">
+              Head-to-Head vs {nextGameOpponent}
+            </h3>
+          </div>
+        </div>
+        <div className="text-center py-12">
+          <p className="text-gray-400 text-lg mb-2">
+            No previous games found against {nextGameOpponent}
+          </p>
+          <p className="text-gray-500 text-sm">
+            This player has never played against this team in their career.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="bg-gray-800 rounded-lg shadow-xl p-6 border border-gray-700">
+    <motion.div 
+      key={selectedProp}
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.2, ease: "easeOut" }}
+      className="bg-gray-800 rounded-lg shadow-xl p-6 border border-gray-700"
+    >
       <div className="flex items-center justify-between mb-4">
         <div>
-          <h3 className="text-xl font-bold text-white mb-1">Player Game Log</h3>
-          {overUnderRecord.over + overUnderRecord.under > 0 && (
+          <h3 className="text-xl font-bold text-white mb-1">
+            {seasonFilter === 'H2H' && nextGameOpponent 
+              ? `Head-to-Head vs ${nextGameOpponent}` 
+              : 'Player Game Log'}
+          </h3>
+          {overUnderRecord.over + overUnderRecord.under > 0 && seasonFilter !== 'H2H' && (
             <p className="text-sm text-gray-400">
               The Over has hit <span className="text-green-400 font-semibold">{overUnderRecord.over}/{overUnderRecord.over + overUnderRecord.under}</span> this season based on lines for each game.
+            </p>
+          )}
+          {seasonFilter === 'H2H' && overUnderRecord.over + overUnderRecord.under > 0 && filteredStats.length > 0 && (
+            <p className="text-sm text-gray-400">
+              The Over has hit <span className="text-green-400 font-semibold">{overUnderRecord.over}/{overUnderRecord.over + overUnderRecord.under}</span> in games against {nextGameOpponent}.
             </p>
           )}
         </div>
@@ -188,6 +280,7 @@ function GameLogTable({ stats, selectedProp, prediction, bettingLine }) {
         >
           <option>2025 Season</option>
           <option>2024 Season</option>
+          {nextGameOpponent && <option>H2H</option>}
         </select>
       </div>
       
@@ -198,7 +291,6 @@ function GameLogTable({ stats, selectedProp, prediction, bettingLine }) {
               <th className="text-left py-3 px-4 text-gray-400 font-semibold">Date</th>
               <th className="text-left py-3 px-4 text-gray-400 font-semibold">Matchup</th>
               <th className="text-center py-3 px-4 text-gray-400 font-semibold">Score</th>
-              <th className="text-center py-3 px-4 text-gray-400 font-semibold">Spread Result</th>
               <th className="text-center py-3 px-4 text-gray-400 font-semibold">Minutes</th>
               <th className="text-center py-3 px-4 text-gray-400 font-semibold">Prop Line</th>
               <th className="text-center py-3 px-4 text-gray-400 font-semibold">
@@ -234,11 +326,17 @@ function GameLogTable({ stats, selectedProp, prediction, bettingLine }) {
               const opponentLabel = isAway ? `@${game.opponent}` : game.opponent;
               
               return (
-                <tr key={idx} className="border-b border-gray-700 hover:bg-gray-750/50 transition-colors">
+                <motion.tr 
+                  key={idx} 
+                  initial={{ opacity: 0, x: -10 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ delay: idx * 0.01, duration: 0.15 }}
+                  whileHover={{ backgroundColor: 'rgba(55, 65, 81, 0.5)' }}
+                  className="border-b border-gray-700 transition-colors"
+                >
                   <td className="py-3 px-4 text-gray-300 font-medium">{formatDate(game.date)}</td>
                   <td className="py-3 px-4 text-white font-medium">{opponentLabel || 'N/A'}</td>
                   <td className="py-3 px-4 text-center text-gray-300">{formatScore(game)}</td>
-                  <td className="py-3 px-4 text-center text-gray-300">{formatSpreadResult(game)}</td>
                   <td className="py-3 px-4 text-center text-gray-300">{game.minutes || 0}</td>
                   <td className={`py-3 px-4 text-center font-semibold ${ou ? ou.bgColor : 'text-gray-400'}`}>
                     {line ? parseFloat(line).toFixed(1) : 'N/A'}
@@ -254,7 +352,7 @@ function GameLogTable({ stats, selectedProp, prediction, bettingLine }) {
                   <td className="py-3 px-4 text-center text-gray-300">{fgm}-{fga} ({fgPct}%)</td>
                   <td className="py-3 px-4 text-center text-gray-300">{ftm}-{fta} ({ftPct}%)</td>
                   <td className="py-3 px-4 text-center text-gray-300">{tpm}-{tpa} ({tpPct}%)</td>
-                </tr>
+                </motion.tr>
               );
             })}
             {/* Averages Row */}
@@ -280,7 +378,7 @@ function GameLogTable({ stats, selectedProp, prediction, bettingLine }) {
           </tbody>
         </table>
       </div>
-    </div>
+    </motion.div>
   );
 }
 

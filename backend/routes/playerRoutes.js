@@ -116,6 +116,7 @@ router.get('/with-lines', async (req, res) => {
               playersWithLines.push({
                 name: playerName,
                 betting_line: line,
+                prop_type: 'points', // Currently only fetching points props
                 bookmaker: bookmaker.title || bookmaker.key,
                 event_id: event.id,
                 home_team: event.home_team,
@@ -252,11 +253,158 @@ router.get('/:id/prediction', async (req, res) => {
     if (!stats.games || stats.games.length < 3) {
       return res.status(400).json({ error: `Insufficient game data. Need at least 3 games, got ${stats.games?.length || 0}` });
     }
-    const prediction = await predictPointsFromGames(stats.games, playerName);
+    const prediction = await predictPointsFromGames(stats.games, playerName, null, null, null);
     res.json(prediction);
   } catch (error) {
     console.error('Error generating prediction:', error);
     res.status(500).json({ error: error.message || 'Failed to generate prediction' });
+  }
+});
+
+/**
+ * GET /api/player/:id/prediction/:propType
+ * Generate prediction for a specific prop type on demand (lazy loading)
+ * Requires player name as query parameter
+ */
+router.get('/:id/prediction/:propType', async (req, res) => {
+  try {
+    const playerName = req.query.name;
+    const propType = req.params.propType; // e.g., 'points', 'assists', 'rebounds', etc.
+    
+    if (!playerName) {
+      return res.status(400).json({ error: 'Player name (name query parameter) is required' });
+    }
+    
+    if (!propType) {
+      return res.status(400).json({ error: 'Prop type is required' });
+    }
+    
+    // Get player stats
+    const { getPlayerStatsFromNBA } = await import('../services/nbaApiService.js');
+    const stats = await getPlayerStatsFromNBA(playerName);
+    
+    if (!stats.games || stats.games.length < 3) {
+      return res.status(400).json({ error: `Insufficient game data. Need at least 3 games, got ${stats.games?.length || 0}` });
+    }
+    
+    // Get team abbreviation - next game info will come from Odds API
+    const teamAbbrev = stats.player?.team?.abbreviation || stats.team || null;
+    
+    // Next game info will be populated from Odds API when we fetch betting lines
+    let nextGame = null;
+    let nextGameInfo = null;
+    
+    // Get injury data - will be populated after we have Odds API game info
+    let injuryData = null;
+    
+    // Create cache key
+    const injuryHash = injuryData 
+      ? JSON.stringify({
+          playerTeam: injuryData.playerTeamInjuries.map(i => i.playerName).sort(),
+          opponent: injuryData.opponentInjuries.map(i => i.playerName).sort()
+        })
+      : 'no_injuries';
+    const gamesHash = createGamesHash(stats.games);
+    const cacheKey = `${gamesHash}_${injuryHash}_${propType}`;
+    
+    // Check cache first
+    let prediction = predictionsCache.get(playerName, cacheKey);
+    
+    if (!prediction) {
+      // Get the CORRECT vegas line for this specific prop from The Odds API
+      // ALSO extract game info for matchup data
+      let bettingLine = null;
+      try {
+        const { getPlayerOdds } = await import('../services/oddsService.js');
+        const oddsResult = await getPlayerOdds(null, playerName);
+        bettingLine = oddsResult?.[propType]?.line || null;
+        console.log(`📊 Betting line for ${propType} from The Odds API: ${bettingLine || 'not available'}`);
+        
+        // Extract game info from Odds API if available
+        if (oddsResult?._gameInfo) {
+          const gameInfo = oddsResult._gameInfo;
+          const { getTeamAbbrevFromFullName } = await import('../services/teamMappingService.js');
+          const homeTeamAbbrev = getTeamAbbrevFromFullName(gameInfo.home_team);
+          const awayTeamAbbrev = getTeamAbbrevFromFullName(gameInfo.away_team);
+          
+          if (homeTeamAbbrev && awayTeamAbbrev && teamAbbrev) {
+            const isHome = teamAbbrev === homeTeamAbbrev;
+            const opponent = isHome ? awayTeamAbbrev : homeTeamAbbrev;
+            
+            const gameDate = new Date(gameInfo.commence_time);
+            nextGame = {
+              opponent: opponent,
+              date: gameDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+              time: gameDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }),
+              isHome: isHome,
+              eventId: gameInfo.event_id
+            };
+            
+            nextGameInfo = {
+              date: nextGame.date,
+              opponent: opponent,
+              isHome: isHome,
+              team: teamAbbrev
+            };
+            
+            console.log(`🎯 Matchup from Odds API: ${teamAbbrev} ${isHome ? 'vs' : '@'} ${opponent}`);
+          }
+        }
+      } catch (oddsError) {
+        console.warn(`⚠️ Could not fetch odds for ${propType}:`, oddsError.message);
+        // Continue without betting line - compareService will handle unavailable status
+      }
+      
+      // Generate prediction using compareService - ensures we use ONLY the correct vegas line
+      try {
+        const { generatePropPrediction } = await import('../services/compareService.js');
+        const propPrediction = await generatePropPrediction(
+          stats.games,
+          playerName,
+          propType,
+          nextGameInfo,
+          injuryData,
+          bettingLine  // ONLY use The Odds API line for this specific prop
+        );
+        
+        // Convert to format expected by frontend
+        prediction = {
+          [`predicted_${propType}`]: propPrediction.predicted_value,
+          predicted_value: propPrediction.predicted_value,
+          // For backward compatibility with points
+          predicted_points: propType === 'points' ? propPrediction.predicted_value : null,
+          confidence: propPrediction.confidence,
+          error_margin: propPrediction.error_margin,
+          errorMargin: propPrediction.error_margin,
+          recommendation: propPrediction.recommendation,
+          analysis: propPrediction.analysis || null,
+          stats: propPrediction.stats || null,
+          status: propPrediction.status || null
+        };
+        
+        if (prediction) {
+          predictionsCache.set(playerName, cacheKey, prediction);
+        } else {
+          throw new Error(`Prediction service returned null for ${propType}`);
+        }
+      } catch (predError) {
+        console.error(`❌ Error generating ${propType} prediction:`, predError);
+        console.error(`   Stack:`, predError.stack);
+        throw predError;
+      }
+    } else {
+      console.log(`✅ Using cached ${propType} prediction for ${playerName}`);
+    }
+    
+    res.json(prediction);
+  } catch (error) {
+    console.error(`❌ Error generating ${req.params.propType} prediction:`, error);
+    console.error(`   Stack:`, error.stack);
+    res.status(500).json({ 
+      error: error.message || `Failed to generate ${req.params.propType} prediction`,
+      propType: req.params.propType,
+      playerName: req.query.name
+    });
   }
 });
 
@@ -287,12 +435,9 @@ router.get('/:id/compare', async (req, res) => {
       return res.status(400).json({ error: 'Player name (name query parameter) is required' });
     }
     
-    console.log(`📊 Fetching compare data for player: ${playerName}`);
-    
     // 1. Get player stats (check cache first)
     let stats = playerStatsCache.get(playerName);
     if (!stats) {
-      console.log(`💾 Cache miss for stats, fetching from API...`);
       stats = await getPlayerStatsFromNBA(playerName);
       if (stats) {
         const nbaPlayerId = stats.player?.nba_id || stats.player?.id;
@@ -300,58 +445,176 @@ router.get('/:id/compare', async (req, res) => {
           ? stats.player.team 
           : stats.player?.team?.abbreviation;
         playerStatsCache.set(playerName, stats, nbaPlayerId, teamAbbrev);
-        console.log(`✅ Cached stats for ${playerName}`);
       }
-    } else {
-      console.log(`✅ Using cached stats for ${playerName}`);
     }
     
     if (!stats || !stats.games || stats.games.length < 3) {
       throw new Error(`Insufficient game data. Need at least 3 games, got ${stats?.games?.length || 0}.`);
     }
     
+    // Normalize game results so frontend always receives a value (W/L) for score column
+    const normalizedGames = stats.games.map((game) => {
+      const fallbackResult = game?.win_loss || game?.wl || game?.game_result || null;
+      return {
+        ...game,
+        result: (typeof game.result === 'string' && game.result.trim() !== '')
+          ? game.result
+          : (typeof fallbackResult === 'string' && fallbackResult.trim() !== '' ? fallbackResult : null)
+      };
+    });
+    stats = {
+      ...stats,
+      games: normalizedGames
+    };
+    
     // Extract player name and team info
     const finalPlayerName = `${stats.player.first_name} ${stats.player.last_name}`.trim() || playerName;
-    const teamAbbrev = typeof stats.player?.team === 'string' 
-      ? stats.player.team 
-      : stats.player?.team?.abbreviation || null;
     
-    // 2. Get next game (check cache) - needed for prediction tracking
+    // Try to get team abbreviation from multiple sources
+    let teamAbbrev = null;
+    if (typeof stats.player?.team === 'string') {
+      teamAbbrev = stats.player.team;
+    } else if (stats.player?.team?.abbreviation) {
+      teamAbbrev = stats.player.team.abbreviation;
+    }
+    
+    // 2. Get next game - will be populated from Odds API _gameInfo
+    // NO LONGER using ESPN getNextGame - Odds API is the only source
     let nextGame = null;
-    if (teamAbbrev && teamAbbrev !== 'N/A') {
-      nextGame = nextGamesCache.get(teamAbbrev);
-      if (!nextGame) {
-        console.log(`💾 Cache miss for next game, fetching...`);
-        const { getNextGame } = await import('../services/nbaApiService.js');
-        nextGame = await getNextGame(null, teamAbbrev);
-        if (nextGame) {
-          nextGamesCache.set(teamAbbrev, nextGame);
-          console.log(`✅ Cached next game for ${teamAbbrev}`);
+    
+    // 2b. Get team records and injury data in parallel (independent operations)
+    const { getTeamRecord } = await import('../services/nbaApiService.js');
+    const { getMatchupInjuries } = await import('../services/injuryService.js');
+    
+    // Parallelize independent operations (all can run simultaneously)
+    const [playerTeamRecordResult, opponentRecordResult, matchupInjuriesResult] = await Promise.allSettled([
+      // Get player team record
+      teamAbbrev && teamAbbrev !== 'N/A' ? getTeamRecord(teamAbbrev) : Promise.resolve(null),
+      // Get opponent record
+      nextGame && nextGame.opponent ? getTeamRecord(nextGame.opponent) : Promise.resolve(null),
+      // Get injury data (if we have team info and next game)
+      (teamAbbrev && teamAbbrev !== 'N/A' && nextGame && nextGame.opponent) 
+        ? getMatchupInjuries(teamAbbrev, nextGame.opponent, nextGame.eventId || null)
+        : Promise.resolve({ playerTeamInjuries: [], opponentInjuries: [], hasPlayerTeamInjuries: false, hasOpponentInjuries: false })
+    ]);
+    
+    // Extract results (silently handle failures)
+    const playerTeamRecord = playerTeamRecordResult.status === 'fulfilled' ? playerTeamRecordResult.value : null;
+    const opponentRecord = opponentRecordResult.status === 'fulfilled' ? opponentRecordResult.value : null;
+    
+    // Process injury data
+    let injuryData = null;
+    if (matchupInjuriesResult.status === 'fulfilled') {
+      const matchupInjuries = matchupInjuriesResult.value;
+      if (matchupInjuries.hasPlayerTeamInjuries || matchupInjuries.hasOpponentInjuries) {
+        injuryData = {
+          playerTeamInjuries: matchupInjuries.playerTeamInjuries,
+          opponentInjuries: matchupInjuries.opponentInjuries,
+          playerTeamAbbrev: teamAbbrev,
+          opponentAbbrev: nextGame.opponent
+        };
+      }
+    }
+    
+    // 3. Get betting odds from The Odds API ONLY
+    // Returns an object with all props: { points: {...}, assists: {...}, rebounds: {...}, etc. }
+    let allProps = {}; // Initialize to empty object
+    let odds = null; // Backward compatibility: points prop only
+    
+    // Check cache first (only use if it's from API, not homepage)
+    const cachedOdds = bettingLinesCache.get(finalPlayerName, teamAbbrev, nextGame?.opponent);
+    if (cachedOdds && cachedOdds.line && cachedOdds.source !== 'homepage') {
+      // Convert cached single prop to new format
+      allProps = {
+        points: cachedOdds
+      };
+      odds = cachedOdds;
+    }
+    
+    // Always fetch from The Odds API - this is the ONLY source of truth
+    try {
+      const oddsResult = await getPlayerOdds(null, finalPlayerName, {
+        teamAbbrev: teamAbbrev,
+        opponentAbbrev: nextGame?.opponent || null
+      });
+      
+      if (oddsResult && typeof oddsResult === 'object' && Object.keys(oddsResult).length > 0) {
+        // Extract game info from Odds API - THIS IS NOW THE ONLY SOURCE FOR MATCHUP DATA
+        if (oddsResult._gameInfo) {
+          const gameInfo = oddsResult._gameInfo;
+          console.log(`🎯 Using Odds API for matchup data:`, gameInfo);
+          
+          try {
+            // Convert Odds API full team names to abbreviations
+            const { getTeamAbbrevFromFullName } = await import('../services/teamMappingService.js');
+            const homeTeamAbbrev = getTeamAbbrevFromFullName(gameInfo.home_team);
+            const awayTeamAbbrev = getTeamAbbrevFromFullName(gameInfo.away_team);
+            
+            console.log(`📊 Odds API game: ${gameInfo.home_team} (${homeTeamAbbrev}) vs ${gameInfo.away_team} (${awayTeamAbbrev})`);
+          
+            // If we don't have teamAbbrev from ESPN, determine it from the Odds API game
+            if (!teamAbbrev) {
+              // Player must be on one of these two teams - check which one
+              // For now, default to home team (will be corrected if ESPN data comes through)
+              teamAbbrev = homeTeamAbbrev || awayTeamAbbrev;
+              console.log(`⚠️ Team abbreviation not from ESPN, using Odds API: ${teamAbbrev}`);
+            }
+            
+            // ALWAYS override nextGame with Odds API data (this is our source of truth)
+            if (homeTeamAbbrev && awayTeamAbbrev) {
+              const isHome = teamAbbrev === homeTeamAbbrev;
+              const opponent = isHome ? awayTeamAbbrev : homeTeamAbbrev;
+              
+              const gameDate = new Date(gameInfo.commence_time);
+              nextGame = {
+                opponent: opponent,
+                date: gameDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+                time: gameDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }),
+                isHome: isHome,
+                eventId: gameInfo.event_id,
+                home_team: homeTeamAbbrev,
+                away_team: awayTeamAbbrev,
+                commence_time: gameInfo.commence_time
+              };
+              
+              console.log(`✅ Matchup from Odds API: ${teamAbbrev} ${isHome ? 'vs' : '@'} ${opponent}`);
+            }
+          } catch (mappingError) {
+            console.error(`❌ Error mapping Odds API game info:`, mappingError.message);
+          }
         }
-      } else {
-        console.log(`✅ Using cached next game for ${teamAbbrev}`);
+        
+        // Use ONLY API results - no merging, no fallbacks, no validation
+        allProps = oddsResult;
+        
+        // Remove the _gameInfo metadata from props (it's not a prop)
+        delete allProps._gameInfo;
+        
+        // Extract points prop for backward compatibility
+        odds = oddsResult.points || null;
+        
+        // Cache the points prop
+        if (odds && odds.line) {
+          bettingLinesCache.set(
+            finalPlayerName, 
+            odds.line, 
+            odds.bookmaker, 
+            odds.source || 'theoddsapi', 
+            odds.event_id,
+            teamAbbrev, 
+            nextGame?.opponent
+          );
+        }
+      }
+    } catch (oddsError) {
+      // Silently use cache if API fails
+      if (Object.keys(allProps).length === 0 && cachedOdds && cachedOdds.line) {
+        allProps = { points: cachedOdds };
+        odds = cachedOdds;
       }
     }
-    
-    // 2b. Get team records for player's team and opponent
-    let playerTeamRecord = null;
-    let opponentRecord = null;
-    if (teamAbbrev && teamAbbrev !== 'N/A') {
-      const { getTeamRecord } = await import('../services/nbaApiService.js');
-      playerTeamRecord = await getTeamRecord(teamAbbrev);
-      if (playerTeamRecord) {
-        console.log(`✅ Found team record for ${teamAbbrev}: ${playerTeamRecord}`);
-      }
-    }
-    if (nextGame && nextGame.opponent) {
-      const { getTeamRecord } = await import('../services/nbaApiService.js');
-      opponentRecord = await getTeamRecord(nextGame.opponent);
-      if (opponentRecord) {
-        console.log(`✅ Found opponent record for ${nextGame.opponent}: ${opponentRecord}`);
-      }
-    }
-    
-    // 3. Get prediction (check cache using games hash)
+
+    // 4. Generate predictions for all available props (after we know which props exist)
     // Prepare next game info for tracking
     const nextGameInfo = nextGame ? {
       date: nextGame.date || null,
@@ -360,155 +623,72 @@ router.get('/:id/compare', async (req, res) => {
       team: teamAbbrev || null
     } : null;
     
+    // Create cache key that includes injury data (injuries change frequently)
+    const injuryHash = injuryData 
+      ? JSON.stringify({
+          playerTeam: injuryData.playerTeamInjuries.map(i => i.playerName).sort(),
+          opponent: injuryData.opponentInjuries.map(i => i.playerName).sort()
+        })
+      : 'no_injuries';
     const gamesHash = createGamesHash(stats.games);
-    let prediction = predictionsCache.get(playerName, gamesHash);
+    
+    // Get all available prop types (from betting lines we just fetched)
+    const availablePropTypes = Object.keys(allProps || {});
+    
+    // LAZY LOADING: Only generate points prediction on initial load for faster page load
+    // Other prop predictions will be generated on-demand when user clicks on that prop tab
+    let prediction = null;
+    let allPredictions = {}; // Store predictions for all props
+    
+    // Always generate points prediction (for backward compatibility and initial display)
+    // Use compareService to ensure we use ONLY the correct vegas line for points prop
+    const pointsCacheKey = `${gamesHash}_${injuryHash}_points`;
+    prediction = predictionsCache.get(playerName, pointsCacheKey);
     if (!prediction) {
-      console.log(`💾 Cache miss for prediction, generating...`);
-      prediction = await predictPointsFromGames(stats.games, playerName, nextGameInfo);
-      if (prediction) {
-        predictionsCache.set(playerName, gamesHash, prediction);
-        console.log(`✅ Cached prediction for ${playerName}`);
-      }
-    } else {
-      console.log(`✅ Using cached prediction for ${playerName}`);
-    }
-    
-    // 4. Get betting odds (check cache, then provided line with validation, then API)
-    // Now returns an object with all props: { points: {...}, assists: {...}, rebounds: {...}, etc. }
-    let allProps = {}; // Initialize to empty object
-    let odds = null; // Backward compatibility: points prop only
-    const providedBettingLine = req.query.betting_line ? parseFloat(req.query.betting_line) : null;
-    const providedBookmaker = req.query.bookmaker || null;
-    
-    // Calculate player's recent average for validation
-    const recentGames = stats.games.slice(0, 10); // Last 10 games
-    const recentAvg = recentGames.length > 0
-      ? recentGames.reduce((sum, game) => sum + (parseFloat(game.points) || 0), 0) / recentGames.length
-      : null;
-    
-    if (providedBettingLine != null && !isNaN(providedBettingLine)) {
-      // Validate the provided line before using it
-      const predictionPoints = prediction?.predicted_points || prediction?.predictedPoints || null;
-      let lineIsValid = true;
-      let validationReason = '';
+      // Get betting line for points prop ONLY from The Odds API
+      const pointsBettingLine = allProps?.points?.line || null;
       
-      // Check 1: Is line suspiciously low (< 8)?
-      if (providedBettingLine < 8) {
-        lineIsValid = false;
-        validationReason = `Line (${providedBettingLine}) is suspiciously low (< 8)`;
-      }
-      // Check 2: Is line way different from prediction (> 10 points difference)?
-      else if (predictionPoints && Math.abs(providedBettingLine - predictionPoints) > 10) {
-        lineIsValid = false;
-        validationReason = `Line (${providedBettingLine}) differs significantly from prediction (${predictionPoints.toFixed(1)})`;
-      }
-      // Check 3: Is line way higher than recent average (> 10 points above average)?
-      else if (recentAvg && providedBettingLine > recentAvg + 10) {
-        lineIsValid = false;
-        validationReason = `Line (${providedBettingLine}) is much higher than recent average (${recentAvg.toFixed(1)})`;
-      }
-      // Check 3b: Is line way lower than recent average (> 8 points below average)?
-      else if (recentAvg && providedBettingLine < recentAvg - 8) {
-        lineIsValid = false;
-        validationReason = `Line (${providedBettingLine}) is much lower than recent average (${recentAvg.toFixed(1)})`;
-      }
-      // Check 4: Is line suspiciously high (> 60)?
-      else if (providedBettingLine > 60) {
-        lineIsValid = false;
-        validationReason = `Line (${providedBettingLine}) is suspiciously high (> 60)`;
-      }
+      // Use compareService to generate prediction with correct line
+      const { generatePropPrediction } = await import('../services/compareService.js');
+      const pointsPrediction = await generatePropPrediction(
+        stats.games,
+        finalPlayerName,
+        'points',
+        nextGameInfo,
+        injuryData,
+        pointsBettingLine  // ONLY use The Odds API line for points
+      );
       
-      if (lineIsValid) {
-        // Use provided line from homepage (create points prop only for backward compatibility)
-        odds = {
-          line: providedBettingLine,
-          bookmaker: providedBookmaker || 'Unknown',
-          source: 'homepage'
-        };
-        allProps = {
-          points: odds
-        };
-        bettingLinesCache.set(finalPlayerName, providedBettingLine, providedBookmaker, 'homepage', null, teamAbbrev, nextGame?.opponent);
-        console.log(`✅ Using betting line from homepage: ${providedBettingLine}`);
-      } else {
-        // Reject suspicious line and fetch from API instead
-        console.log(`⚠️  Rejecting homepage line: ${validationReason}`);
-        console.log(`   📊 Prediction: ${predictionPoints?.toFixed(1) || 'N/A'}, Recent avg: ${recentAvg?.toFixed(1) || 'N/A'}`);
-        console.log(`   🔄 Fetching fresh line from API instead...`);
-        // Fall through to API fetch below
+      // Convert to format expected by frontend
+      prediction = {
+        predicted_points: pointsPrediction.predicted_value,
+        predictedPoints: pointsPrediction.predicted_value,
+        confidence: pointsPrediction.confidence,
+        error_margin: pointsPrediction.error_margin,
+        errorMargin: pointsPrediction.error_margin,
+        recommendation: pointsPrediction.recommendation,
+        analysis: pointsPrediction.analysis || null,
+        stats: pointsPrediction.stats || null
+      };
+      
+      if (prediction.predicted_points != null) {
+        predictionsCache.set(playerName, pointsCacheKey, prediction);
       }
     }
+    allPredictions.points = prediction;
     
-    // Always try to fetch other props from API, even if we have points from homepage
-    // This ensures we get assists, rebounds, steals, blocks, threes, and combined props
-    const hasOnlyHomepagePoints = Object.keys(allProps).length === 1 && allProps.points && allProps.points.source === 'homepage';
-    
-    if (Object.keys(allProps).length === 0 || hasOnlyHomepagePoints) {
-      // If we only have homepage points, we still want to fetch other props from API
-      if (hasOnlyHomepagePoints) {
-        console.log(`📊 Have homepage points prop, fetching other props from API...`);
-      }
-      
-      // Check cache first (for backward compatibility, cache still stores single points line)
-      const cachedOdds = bettingLinesCache.get(finalPlayerName, teamAbbrev, nextGame?.opponent);
-      if (cachedOdds && cachedOdds.line && Object.keys(allProps).length === 0) {
-        // Convert cached single prop to new format (only if we don't already have points from homepage)
-        allProps = {
-          points: cachedOdds
-        };
-        odds = cachedOdds;
-        console.log(`✅ Using cached odds for ${finalPlayerName}`);
-      }
-      
-      // Always try to fetch from The Odds API to get all available props
-      // This will merge with existing props (e.g., if we have points from homepage, we'll add other props)
-      try {
-        console.log(`🔍 Fetching all props from The Odds API for ${finalPlayerName}...`);
-        const oddsResult = await getPlayerOdds(null, finalPlayerName, {
-          teamAbbrev: teamAbbrev,
-          opponentAbbrev: nextGame?.opponent || null
-        });
-        if (oddsResult && typeof oddsResult === 'object' && Object.keys(oddsResult).length > 0) {
-          // Merge API results with existing props (homepage points will be kept if API doesn't have points)
-          // API props take precedence for non-points props
-          for (const [propType, propData] of Object.entries(oddsResult)) {
-            if (propType === 'points' && allProps.points && allProps.points.source === 'homepage') {
-              // Keep homepage points if it exists, but still add other props from API
-              console.log(`📌 Keeping homepage points prop, adding API ${propType} prop`);
-            } else {
-              // Add or update prop from API
-              allProps[propType] = propData;
-            }
-          }
-          
-          // Extract points prop for backward compatibility (use API points if available, otherwise homepage)
-          odds = oddsResult.points || allProps.points || null;
-          
-          // Cache the points prop for backward compatibility
-          if (odds && odds.line) {
-            bettingLinesCache.set(
-              finalPlayerName, 
-              odds.line, 
-              odds.bookmaker, 
-              odds.source || 'api', 
-              odds.event_id,
-              teamAbbrev, 
-              nextGame?.opponent
-            );
-          }
-          console.log(`✅ Fetched props from API for ${finalPlayerName} (found ${Object.keys(oddsResult).length} prop types from API, total: ${Object.keys(allProps).length})`);
-        } else {
-          console.log(`⚠️ API returned no props for ${finalPlayerName}`);
+    // Check cache for other props (but don't generate them - lazy load on demand)
+    // This allows us to show cached predictions if available, but not block page load
+    for (const propType of availablePropTypes) {
+      if (propType !== 'points') {
+        const cacheKey = `${gamesHash}_${injuryHash}_${propType}`;
+        const cached = predictionsCache.get(playerName, cacheKey);
+        if (cached) {
+          allPredictions[propType] = cached;
         }
-      } catch (oddsError) {
-        console.log(`⚠️ Could not fetch odds from API: ${oddsError.message}`);
-        // Keep existing props (e.g., points from homepage) if API call fails
+        // If not cached, we'll generate it on-demand when user clicks that prop tab
       }
     }
-
-    console.log('Stats:', stats ? 'OK' : 'Failed');
-    console.log('Prediction:', prediction ? 'OK' : 'Failed');
-    console.log('Odds:', odds ? 'OK' : 'Unavailable');
 
     // Use the playerName we already extracted, or fallback
     if (!playerName) {
@@ -524,18 +704,22 @@ router.get('/:id/compare', async (req, res) => {
       }
     }
 
-    // Determine recommendation (based on points prop)
-    let recommendation = 'N/A';
+    // Extract predicted points and betting line
     const predictedPoints = prediction?.predicted_points || prediction?.predictedPoints || null;
     const bettingLine = odds?.line || (allProps?.points?.line) || null;
     
-    if (predictedPoints !== null && bettingLine !== null) {
-      if (predictedPoints > bettingLine) {
-        recommendation = 'OVER';
-      } else if (predictedPoints < bettingLine) {
-        recommendation = 'UNDER';
-      } else {
-        recommendation = 'PUSH';
+    // Use recommendation from prediction service (if available)
+    // Fallback to manual calculation for backward compatibility
+    let recommendation = prediction?.recommendation || 'N/A';
+    if (recommendation === 'N/A' || !recommendation) {
+      if (predictedPoints !== null && bettingLine !== null) {
+        if (predictedPoints > bettingLine) {
+          recommendation = 'OVER';
+        } else if (predictedPoints < bettingLine) {
+          recommendation = 'UNDER';
+        } else {
+          recommendation = 'PUSH';
+        }
       }
     }
 
@@ -566,6 +750,17 @@ router.get('/:id/compare', async (req, res) => {
       error_margin: prediction?.error_margin || prediction?.errorMargin || null,
       next_game: nextGame ? {
         ...nextGame,
+        // Standardized matchup fields from Odds API
+        player_team: finalPlayerTeam,
+        opponent_team: nextGame.opponent,
+        is_home: nextGame.isHome,
+        home_team: nextGame.home_team || (nextGame.isHome ? finalPlayerTeam : nextGame.opponent),
+        away_team: nextGame.away_team || (nextGame.isHome ? nextGame.opponent : finalPlayerTeam),
+        commence_time: nextGame.commence_time || null,
+        display_matchup: nextGame.isHome 
+          ? `${finalPlayerTeam} vs ${nextGame.opponent}` 
+          : `${finalPlayerTeam} @ ${nextGame.opponent}`,
+        // Additional display info
         opponent_logo: getTeamLogo(opponentTeam),
         opponent_name: getTeamName(opponentTeam),
         opponent_record: opponentRecord
@@ -577,12 +772,31 @@ router.get('/:id/compare', async (req, res) => {
       odds_source: odds?.source || null,
       odds_bookmaker: odds?.bookmaker || null,
       odds_error: odds ? null : 'No betting line available',
-      // New: All available props
+      // New: All available props with predictions
       props: (() => {
-        console.log(`📊 Returning props for ${finalPlayerName}:`, Object.keys(allProps || {}));
-        console.log(`📊 Props details:`, JSON.stringify(allProps, null, 2));
-        return allProps || {};
+        const propsWithPredictions = {};
+        
+        // Merge betting lines with predictions
+        for (const [propType, propData] of Object.entries(allProps || {})) {
+          const prediction = allPredictions[propType];
+          propsWithPredictions[propType] = {
+            ...propData,
+            // Add prediction data if available (including analysis)
+            ...(prediction ? {
+              prediction: prediction[`predicted_${propType}`] || prediction.predicted_points || null,
+              prediction_confidence: prediction.confidence || null,
+              prediction_error_margin: prediction.error_margin || null,
+              prediction_analysis: prediction.analysis || null,
+              prediction_recommendation: prediction.recommendation || null,
+              prediction_stats: prediction.stats || null
+            } : {})
+          };
+        }
+        
+        return propsWithPredictions;
       })(),
+      // Store all predictions separately for easy access
+      predictions: allPredictions,
       player_image: (() => {
         // Check cache first for image metadata
         const imageMeta = imageMetadataCache.get(finalPlayerName);
@@ -609,10 +823,33 @@ router.get('/:id/compare', async (req, res) => {
         // No image available
         imageMetadataCache.setNoImage(finalPlayerName);
         return null;
-      })()
+      })(),
+      // Injury data for both teams - only include if we have actual injuries
+      injuries: injuryData && (injuryData.playerTeamInjuries?.length > 0 || injuryData.opponentInjuries?.length > 0) ? {
+        player_team: {
+          team: injuryData.playerTeamAbbrev,
+          injuries: injuryData.playerTeamInjuries.filter(inj => inj.playerName && inj.playerName !== 'Unknown' && inj.status && inj.status !== 'Unknown') || []
+        },
+        opponent: {
+          team: injuryData.opponentAbbrev,
+          injuries: injuryData.opponentInjuries.filter(inj => inj.playerName && inj.playerName !== 'Unknown' && inj.status && inj.status !== 'Unknown') || []
+        }
+      } : {
+        player_team: {
+          team: teamAbbrev || null,
+          injuries: []
+        },
+        opponent: {
+          team: nextGame?.opponent || null,
+          injuries: []
+        }
+      }
     };
 
-    console.log('Sending response:', JSON.stringify(response, null, 2));
+    // Only log response structure in development
+    if (process.env.NODE_ENV === 'development') {
+      console.log('Sending response:', JSON.stringify(response, null, 2));
+    }
     res.json(response);
   } catch (error) {
     console.error('Error in compare endpoint:', error);

@@ -37,7 +37,8 @@ const TEAM_LOGOS = {
   'SAS': 'https://cdn.nba.com/logos/nba/1610612759/primary/L/logo.svg',
   'TOR': 'https://cdn.nba.com/logos/nba/1610612761/primary/L/logo.svg',
   'UTA': 'https://cdn.nba.com/logos/nba/1610612762/primary/L/logo.svg',
-  'WAS': 'https://cdn.nba.com/logos/nba/1610612764/primary/L/logo.svg'
+  'WAS': 'https://cdn.nba.com/logos/nba/1610612764/primary/L/logo.svg',
+  'WSH': 'https://cdn.nba.com/logos/nba/1610612764/primary/L/logo.svg' // Alias for WAS (Washington Wizards)
 };
 
 /**
@@ -86,7 +87,8 @@ export function getTeamName(teamAbbrev) {
     'SAS': 'San Antonio Spurs',
     'TOR': 'Toronto Raptors',
     'UTA': 'Utah Jazz',
-    'WAS': 'Washington Wizards'
+    'WAS': 'Washington Wizards',
+    'WSH': 'Washington Wizards' // Alias for WAS
   };
   
   const abbrev = teamAbbrev?.toUpperCase().trim();

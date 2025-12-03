@@ -34,7 +34,11 @@ function ComparisonBox({ comparisonData }) {
       <div className="space-y-4">
         <div className="flex justify-between items-center p-4 bg-gray-700 rounded-lg">
           <span className="font-semibold text-gray-300">Our Prediction:</span>
-          <span className="text-2xl font-bold text-purple-400">
+          <span className={`text-2xl font-bold ${
+            recommendation === 'OVER' ? 'text-green-400' :
+            recommendation === 'UNDER' ? 'text-red-400' :
+            'text-yellow-400'
+          }`}>
             {prediction?.toFixed(1) || 'N/A'}
           </span>
         </div>

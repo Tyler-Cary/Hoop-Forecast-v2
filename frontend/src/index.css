@@ -2,6 +2,159 @@
 @tailwind components;
 @tailwind utilities;
 
+* {
+  scroll-behavior: smooth;
+}
+
+/* Performance optimizations */
+* {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* GPU acceleration for animations - only when needed */
+.motion-div,
+[data-framer-component] {
+  will-change: transform, opacity;
+  transform: translateZ(0);
+  backface-visibility: hidden;
+}
+
+/* High-quality image rendering utility class */
+.crisp-image,
+img.select-none {
+  image-rendering: -webkit-optimize-contrast;
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
+  -webkit-transform: translateZ(0);
+  transform: translateZ(0);
+  image-rendering: high-quality;
+}
+
+/* Prevent transforms from affecting nested images */
+.transform-none {
+  transform: none !important;
+  -webkit-transform: none !important;
+}
+
+/* Ensure crisp text rendering on transforms */
+* {
+  -webkit-font-smoothing: subpixel-antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Fire emoji animation for trending players */
+@keyframes fire-flicker {
+  0%, 100% { 
+    transform: scale(1) rotate(-5deg);
+    opacity: 1;
+  }
+  25% { 
+    transform: scale(1.1) rotate(5deg);
+    opacity: 0.9;
+  }
+  50% { 
+    transform: scale(0.95) rotate(-3deg);
+    opacity: 1;
+  }
+  75% { 
+    transform: scale(1.05) rotate(3deg);
+    opacity: 0.95;
+  }
+}
+
+.fire-emoji {
+  animation: fire-flicker 1.5s ease-in-out infinite;
+  display: inline-block;
+  transform-origin: center bottom;
+}
+
+/* 🔥 Trending Card with Fire Effects */
+.trending-card {
+  position: relative;
+  overflow: visible; /* Required so embers can rise */
+  z-index: 1;
+}
+
+/* Heat glow around card edges */
+.trending-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: radial-gradient(
+    circle at bottom center,
+    rgba(255, 150, 50, 0.25) 0%,
+    rgba(255, 100, 20, 0.15) 25%,
+    transparent 70%
+  );
+  z-index: 1; /* Above embers, below content */
+  pointer-events: none;
+}
+
+/* Fire background layer - full card coverage for ember spawning */
+.fire-background {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: visible;
+  z-index: 0; /* Behind card content */
+}
+
+/* Individual ember particles */
+.ember {
+  position: absolute;
+  bottom: -10px;
+  width: 8px;
+  height: 8px;
+  background: radial-gradient(
+    circle,
+    rgba(255, 180, 80, 0.95) 0%,
+    rgba(255, 130, 50, 0.7) 50%,
+    transparent 100%
+  );
+  border-radius: 50%;
+  opacity: 0;
+  animation: rise 4s linear infinite;
+  filter: blur(0.5px);
+}
+
+/* Staggered ember positions and delays */
+.ember:nth-child(1) { left: 15%; animation-delay: 0s; }
+.ember:nth-child(2) { left: 28%; animation-delay: 0.8s; }
+.ember:nth-child(3) { left: 42%; animation-delay: 1.6s; }
+.ember:nth-child(4) { left: 55%; animation-delay: 0.4s; }
+.ember:nth-child(5) { left: 68%; animation-delay: 2.1s; }
+.ember:nth-child(6) { left: 80%; animation-delay: 0.6s; }
+.ember:nth-child(7) { left: 35%; animation-delay: 1.2s; }
+.ember:nth-child(8) { left: 62%; animation-delay: 2.4s; }
+
+/* Ember rise animation */
+@keyframes rise {
+  0% {
+    transform: translateY(0) scale(1);
+    opacity: 0;
+  }
+  20% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(-200px) scale(0.4);
+    opacity: 0;
+  }
+}
+
+/* Card content wrapper - stays above embers */
+.card-content {
+  position: relative;
+  z-index: 2; /* Keeps text above embers */
+}
+
+/* Optimize transitions */
+button, a, [role="button"] {
+  transition: transform 0.1s ease-out, opacity 0.1s ease-out;
+}
+
 body {
   margin: 0;
   font-family: 'Poppins', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
@@ -12,6 +165,47 @@ body {
   background: #111827;
   min-height: 100vh;
   font-weight: 400;
+  overflow-x: hidden;
+}
+
+/* Smooth scrollbar styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #1f2937;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #4b5563;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #6b7280;
+}
+
+/* Custom animations */
+@keyframes shimmer {
+  0% {
+    background-position: -1000px 0;
+  }
+  100% {
+    background-position: 1000px 0;
+  }
+}
+
+.animate-shimmer {
+  animation: shimmer 2s infinite;
+  background: linear-gradient(
+    to right,
+    #1f2937 0%,
+    #374151 50%,
+    #1f2937 100%
+  );
+  background-size: 1000px 100%;
 }
 
 * {

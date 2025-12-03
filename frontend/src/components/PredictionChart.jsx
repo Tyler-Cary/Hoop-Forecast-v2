@@ -1,15 +1,33 @@
-import { useState } from 'react';
-import { motion } from 'framer-motion';
+import { useState, useEffect } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, Cell } from 'recharts';
 
-function PredictionChart({ stats, prediction, bettingLine, selectedProp }) {
-  const [filter, setFilter] = useState('L15'); // L5, L10, L15, H2H, 2025, 2024
+function PredictionChart({ stats, prediction, bettingLine, selectedProp, loading, nextGameOpponent }) {
+  const [filter, setFilter] = useState('L15'); // L5, L10, L15, H2H, Season, 2025, 2024
+  
+  // Reset filter when prop changes
+  useEffect(() => {
+    setFilter('L15');
+  }, [selectedProp]);
 
   if (!stats || stats.length === 0) {
     return (
       <div className="bg-gray-800 rounded-lg shadow-xl p-6 border border-gray-700">
         <h3 className="text-2xl font-bold text-white mb-4">Prop Analysis</h3>
         <p className="text-gray-400 text-center py-8">No game data available</p>
+      </div>
+    );
+  }
+
+  // Show loading state if prediction is being fetched
+  if (loading && prediction == null) {
+    return (
+      <div className="bg-gray-800 rounded-lg shadow-xl p-6 border border-gray-700">
+        <h3 className="text-2xl font-bold text-white mb-4">Prop Analysis</h3>
+        <div className="flex items-center justify-center py-12">
+          <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-yellow-500"></div>
+          <span className="ml-4 text-gray-400">Generating prediction...</span>
+        </div>
       </div>
     );
   }
@@ -90,8 +108,108 @@ function PredictionChart({ stats, prediction, bettingLine, selectedProp }) {
         return true;
       }
     });
+  } else if (filter === 'Season') {
+    // Show all games from current season (2025-26)
+    filteredStats = sortedStats.filter(game => {
+      if (game.season) {
+        return game.season === '2025-26' || game.season.includes('2025-26');
+      }
+      try {
+        const date = new Date(game.date);
+        return date.getFullYear() === 2025;
+      } catch {
+        return false;
+      }
+    });
+  } else if (filter === 'H2H') {
+    // Filter to only show games against the next opponent (ALL historical games, no season filter)
+    // Use ALL available stats, not just sortedStats (which might be limited)
+    if (nextGameOpponent) {
+      // Simple opponent normalization - no parsing needed since backend provides clean abbreviations
+      const normalizeOpponent = (opp) => {
+        if (!opp) return '';
+        return opp.toString().toUpperCase().trim();
+      };
+      
+      const nextOpponent = normalizeOpponent(nextGameOpponent);
+      
+      // Filter from ALL stats (not just sortedStats which might be limited by other filters)
+      // This ensures we get all available games against this opponent
+      filteredStats = sortedStats.filter(game => {
+        if (!game.opponent) return false;
+        const gameOpponent = normalizeOpponent(game.opponent);
+        return gameOpponent === nextOpponent;
+      });
+      
+      // Sort by date (most recent first) for H2H
+      filteredStats = filteredStats.sort((a, b) => {
+        const dateA = new Date(a.date || 0);
+        const dateB = new Date(b.date || 0);
+        return dateB - dateA;
+      });
+      
+      // Debug log to help diagnose H2H issues
+      if (filteredStats.length > 0) {
+        console.log(`H2H Filter: Found ${filteredStats.length} games against ${nextGameOpponent} (normalized: ${nextOpponent})`);
+      } else {
+        console.log(`H2H Filter: No games found against ${nextGameOpponent} (normalized: ${nextOpponent}). Total stats available: ${sortedStats.length}`);
+        // Log sample opponents to help debug
+        const sampleOpponents = sortedStats.slice(0, 5).map(g => g.opponent).filter(Boolean);
+        console.log(`H2H Filter: Sample opponents in stats:`, sampleOpponents);
+      }
+    } else {
+      // If no next opponent, show no games for H2H
+      filteredStats = [];
+    }
   }
-  // H2H would need opponent info, skipping for now
+
+  // Show empty state for H2H if no games found
+  if (filter === 'H2H' && nextGameOpponent && filteredStats.length === 0) {
+  return (
+    <motion.div 
+      key={selectedProp}
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -20 }}
+      transition={{ duration: 0.2, ease: "easeOut" }}
+      className="bg-gray-800 rounded-lg shadow-xl p-6 border border-gray-700"
+    >
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h3 className="text-2xl font-bold text-white mb-2">Prop Analysis</h3>
+            <p className="text-sm text-gray-400">
+              Head-to-Head vs {nextGameOpponent}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            {['L5', 'L10', 'L15', ...(nextGameOpponent ? ['H2H'] : []), 'Season', '2025', '2024'].map((f) => (
+              <motion.button
+                key={f}
+                onClick={() => setFilter(f)}
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                className={`px-3 py-1.5 rounded text-sm font-medium transition-all duration-200 ${
+                  filter === f
+                    ? 'bg-yellow-500 text-gray-900 font-semibold shadow-lg'
+                    : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                }`}
+              >
+                {f}
+              </motion.button>
+            ))}
+          </div>
+        </div>
+        <div className="text-center py-12">
+          <p className="text-gray-400 text-lg mb-2">
+            No previous games found against {nextGameOpponent}
+          </p>
+          <p className="text-gray-500 text-sm">
+            This player has never played against this team in their career.
+          </p>
+        </div>
+      </motion.div>
+    );
+  }
 
   // Reverse so oldest is on left, newest on right
   const chartData = [...filteredStats].reverse().map((game, index) => {
@@ -162,9 +280,11 @@ function PredictionChart({ stats, prediction, bettingLine, selectedProp }) {
 
   return (
     <motion.div 
+      key={selectedProp}
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.3 }}
+      exit={{ opacity: 0, y: -20 }}
+      transition={{ duration: 0.2, ease: "easeOut" }}
       className="bg-gray-800 rounded-lg shadow-xl p-6 border border-gray-700"
     >
       <div className="flex items-center justify-between mb-4">
@@ -182,7 +302,7 @@ function PredictionChart({ stats, prediction, bettingLine, selectedProp }) {
           )}
         </div>
         <div className="flex items-center gap-2">
-          {['L5', 'L10', 'L15', 'H2H', '2025', '2024'].map((f) => (
+          {['L5', 'L10', 'L15', ...(nextGameOpponent ? ['H2H'] : []), 'Season', '2025', '2024'].map((f) => (
             <motion.button
               key={f}
               onClick={() => setFilter(f)}
@@ -209,12 +329,17 @@ function PredictionChart({ stats, prediction, bettingLine, selectedProp }) {
         </div>
       </div>
       
-      <ResponsiveContainer width="100%" height={400}>
-        <BarChart 
-          data={chartData}
-          margin={{ top: 20, right: 50, left: 20, bottom: 60 }}
-          barCategoryGap="10%"
-        >
+      <motion.div
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ delay: 0.1, duration: 0.2 }}
+      >
+        <ResponsiveContainer width="100%" height={400}>
+          <BarChart 
+            data={chartData}
+            margin={{ top: 20, right: 50, left: 20, bottom: 60 }}
+            barCategoryGap="10%"
+          >
           <CartesianGrid strokeDasharray="3 3" stroke="#4b5563" vertical={false} opacity={0.3} />
           <XAxis 
             dataKey="name"
@@ -261,6 +386,9 @@ function PredictionChart({ stats, prediction, bettingLine, selectedProp }) {
           <Bar 
             dataKey="points" 
             radius={[4, 4, 0, 0]}
+            animationBegin={0}
+            animationDuration={800}
+            animationEasing="ease-out"
           >
             {chartData.map((entry, index) => (
               <Cell 
@@ -301,6 +429,7 @@ function PredictionChart({ stats, prediction, bettingLine, selectedProp }) {
           )}
         </BarChart>
       </ResponsiveContainer>
+      </motion.div>
     </motion.div>
   );
 }

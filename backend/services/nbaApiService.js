@@ -1,4 +1,5 @@
 import axios from 'axios';
+import NodeCache from 'node-cache';
 
 /**
  * NBA.com API Service
@@ -7,6 +8,9 @@ import axios from 'axios';
  */
 
 const NBA_API_BASE = 'https://stats.nba.com/stats';
+
+// Cache for ESPN player searches (24 hours - player names don't change)
+const espnSearchCache = new NodeCache({ stdTTL: 86400, useClones: false });
 const NBA_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   'Accept': 'application/json, text/plain, */*',
@@ -21,7 +25,13 @@ const NBA_HEADERS = {
  */
 export async function searchPlayersESPN(playerName) {
   try {
-    console.log(`🔍 Searching ESPN for players: "${playerName}"`);
+    // Check cache first (normalize name for cache key)
+    const normalizedSearchName = playerName.toLowerCase().trim();
+    const cacheKey = `espn_search:${normalizedSearchName}`;
+    const cached = espnSearchCache.get(cacheKey);
+    if (cached) {
+      return cached;
+    }
     
     const normalizeName = (value) => {
       if (!value) return '';
@@ -62,8 +72,6 @@ export async function searchPlayersESPN(playerName) {
     
     const leagues = teamsResponse.data.sports[0].leagues || [];
     const teams = leagues[0]?.teams || [];
-    
-    console.log(`📋 Found ${teams.length} teams from ESPN`);
     
     // Get rosters for each team in parallel (limit to avoid rate limits)
     const teamPromises = teams.slice(0, 30).map(async (team) => {
@@ -202,6 +210,14 @@ export async function searchPlayersESPN(playerName) {
     });
     
     console.log(`✅ Found ${uniqueResults.length} matching players from ESPN`);
+    
+    // If no results found, log for debugging
+    if (uniqueResults.length === 0) {
+      console.log(`⚠️  No players found for search: "${playerName}"`);
+      console.log(`   Search tokens: ${searchTokens.join(', ')}`);
+      console.log(`   Teams searched: ${teams.length}`);
+    }
+    
     return uniqueResults.slice(0, 25);
     
   } catch (error) {
@@ -210,7 +226,9 @@ export async function searchPlayersESPN(playerName) {
       console.error('Response status:', error.response.status);
       console.error('Response data:', JSON.stringify(error.response.data).substring(0, 200));
     }
-    throw new Error(`Failed to search players on ESPN: ${error.message}`);
+    // Return empty array instead of throwing to prevent frontend crashes
+    console.error('⚠️  Returning empty results due to error');
+    return [];
   }
 }
 
@@ -222,8 +240,6 @@ export async function getPlayerStatsFromNBA(playerName, retryCount = 0) {
   const maxRetries = 2;
   
   try {
-    console.log(`📊 Fetching stats from NBA.com for: ${playerName}${retryCount > 0 ? ` (retry ${retryCount}/${maxRetries})` : ''}`);
-    
     // Search for player with retry logic
     let nbaPlayer = null;
     let searchRetries = 0;
@@ -238,7 +254,6 @@ export async function getPlayerStatsFromNBA(playerName, retryCount = 0) {
         if (searchError.message.includes('timeout') && searchRetries < maxRetries) {
           searchRetries++;
           const backoffDelay = 2000 * searchRetries; // 2s, 4s
-          console.log(`   ⚠️  Search timeout (attempt ${searchRetries}/${maxRetries + 1}), retrying in ${backoffDelay}ms...`);
           await new Promise(resolve => setTimeout(resolve, backoffDelay));
           continue;
         }
@@ -250,8 +265,6 @@ export async function getPlayerStatsFromNBA(playerName, retryCount = 0) {
       throw new Error(`Player "${playerName}" not found on NBA.com`);
     }
     
-    console.log(`✅ Found NBA.com player: ${nbaPlayer.name} (ID: ${nbaPlayer.id})`);
-    
     // Get game log with retry logic
     let games = null;
     let gameLogRetries = 0;
@@ -259,8 +272,8 @@ export async function getPlayerStatsFromNBA(playerName, retryCount = 0) {
       try {
         games = await getPlayerGameLog(nbaPlayer.id, {
           includePreviousSeason: true,
-          currentSeasonGames: 10,
-          previousSeasonGames: 20
+          currentSeasonGames: 50, // Increased to get more H2H data
+          previousSeasonGames: 50 // Increased to get more H2H data
         });
         if (!games || games.length === 0) {
           throw new Error(`No game data found for ${playerName}`);
@@ -270,7 +283,6 @@ export async function getPlayerStatsFromNBA(playerName, retryCount = 0) {
         if (gameLogError.message.includes('timeout') && gameLogRetries < maxRetries) {
           gameLogRetries++;
           const backoffDelay = 2000 * gameLogRetries; // 2s, 4s
-          console.log(`   ⚠️  Game log timeout (attempt ${gameLogRetries}/${maxRetries + 1}), retrying in ${backoffDelay}ms...`);
           await new Promise(resolve => setTimeout(resolve, backoffDelay));
           continue;
         }
@@ -483,8 +495,6 @@ export async function getPlayerGameLog(playerId, options = {}) {
       SeasonType: 'Regular Season'
     };
     
-    console.log(`📊 Fetching game log from NBA.com for player ${playerId}...`);
-    
     // Try with retry logic for rate limiting
     let response = null;
     let lastError = null;
@@ -500,7 +510,6 @@ export async function getPlayerGameLog(playerId, options = {}) {
         
         if (response.status === 403 || response.status === 429) {
           if (attempt < 2) {
-            console.log(`⚠️ NBA.com game log returned ${response.status}, waiting before retry ${attempt + 1}/3...`);
             await new Promise(resolve => setTimeout(resolve, 2000 * (attempt + 1)));
             continue;
           } else {
@@ -513,7 +522,6 @@ export async function getPlayerGameLog(playerId, options = {}) {
         lastError = error;
         if (error.response && (error.response.status === 403 || error.response.status === 429)) {
           if (attempt < 2) {
-            console.log(`⚠️ NBA.com game log error ${error.response.status}, waiting before retry ${attempt + 1}/3...`);
             await new Promise(resolve => setTimeout(resolve, 2000 * (attempt + 1)));
             continue;
           }
@@ -578,9 +586,9 @@ export async function getPlayerGameLog(playerId, options = {}) {
       const turnovers = parseInt(game[tovIndex]) || 0;
       const personal_fouls = parseInt(game[pfIndex]) || 0;
       
-      // Parse opponent from matchup
+      // Parse opponent from matchup for HISTORICAL game log display only
+      // NOTE: For FUTURE games and predictions, use Odds API data instead
       // NBA.com format: "GSW vs. LAL" (GSW is home) or "GSW @ LAL" (GSW is away)
-      // The FIRST team is always the player's team, SECOND is the opponent
       let opponent = 'N/A';
       let isHome = false;
       
@@ -588,77 +596,71 @@ export async function getPlayerGameLog(playerId, options = {}) {
         // Check if it's a home game (contains "vs.")
         if (matchup.includes('vs.')) {
           isHome = true;
-          // Split by "vs." - format: "GSW vs. LAL"
-          // parts[0] = player's team (GSW), parts[1] = opponent (LAL)
           const parts = matchup.split('vs.');
           if (parts.length >= 2) {
-            // Get the opponent (second part)
             opponent = parts[1].trim();
           }
         } else if (matchup.includes('@')) {
-          // Away game - split by "@" - format: "GSW @ LAL"
-          // parts[0] = player's team (GSW), parts[1] = opponent (LAL)
+          // Away game
           isHome = false;
           const parts = matchup.split('@');
           if (parts.length >= 2) {
-            // Get the opponent (second part)
             opponent = parts[1].trim();
           }
         }
         
         // Clean up opponent - extract just the 3-letter team abbreviation
         if (opponent && opponent !== 'N/A') {
-          // Remove any extra whitespace and extract team code
           opponent = opponent.trim();
-          
-          // Extract the 3-letter team abbreviation (e.g., "LAL" from "LAL" or "LAL 123-456")
           const teamMatch = opponent.match(/\b([A-Z]{2,3})\b/);
           if (teamMatch) {
             opponent = teamMatch[1];
           } else {
-            // Fallback: take first 3 characters if it looks like a team code
             const firstPart = opponent.split(' ')[0];
             if (firstPart.length >= 2 && firstPart.length <= 3) {
               opponent = firstPart.toUpperCase();
             }
           }
         }
-        
-        // Debug logging for first game
-        if (index === 0 && seasonLabel === currentSeason) {
-          console.log(`  🔍 Matchup parsing: "${matchup}" → opponent: "${opponent}", home: ${isHome}`);
-        }
       }
       
       // Format date (NBA.com returns "2025-11-12" format)
       const formattedDate = gameDate || '';
       
+      // Normalize keys to standard format (pts, reb, ast, stl, blk, tpm, minutes, opponent)
       return {
         game_number: index + 1,
         date: formattedDate,
+        // Standard normalized keys
+        pts: points,
+        reb: rebounds,
+        ast: assists,
+        stl: steals,
+        blk: blocks,
+        tpm: three_pointers_made,
+        minutes: minutes,
+        opponent: opponent,
+        // Legacy keys for backward compatibility
         points: points,
         rebounds: rebounds,
         assists: assists,
         steals: steals,
         blocks: blocks,
         threes_made: three_pointers_made,
-        threes: three_pointers_made, // Alias for compatibility
+        threes: three_pointers_made,
         field_goals_made: field_goals_made,
-        fgm: field_goals_made, // Alias
+        fgm: field_goals_made,
         field_goals_attempted: field_goals_attempted,
-        fga: field_goals_attempted, // Alias
+        fga: field_goals_attempted,
         free_throws_made: free_throws_made,
-        ftm: free_throws_made, // Alias
+        ftm: free_throws_made,
         free_throws_attempted: free_throws_attempted,
-        fta: free_throws_attempted, // Alias
+        fta: free_throws_attempted,
         three_pointers_made: three_pointers_made,
-        tpm: three_pointers_made, // Alias
         three_pointers_attempted: three_pointers_attempted,
-        tpa: three_pointers_attempted, // Alias
+        tpa: three_pointers_attempted,
         turnovers: turnovers,
         personal_fouls: personal_fouls,
-        opponent: opponent,
-        minutes: minutes,
         home: isHome,
         result: result,
         season: seasonLabel
@@ -700,11 +702,6 @@ export async function getPlayerGameLog(playerId, options = {}) {
       game_number: index + 1
     }));
     
-    console.log(`✅ Retrieved ${processedGames.length} games from NBA.com (current season: ${processedCurrentGames.length}, previous seasons: ${processedPreviousGames.length})`);
-    processedGames.slice(0, 3).forEach(game => {
-      console.log(`  Game ${game.game_number}: ${game.points} pts vs ${game.opponent} on ${game.date} (Season ${game.season})`);
-    });
-    
     return processedGames;
   } catch (error) {
     console.error('❌ Error fetching NBA.com game log:', error.message);
@@ -730,16 +727,11 @@ export async function getNextGame(nbaPlayerId, teamAbbrev) {
       return null;
     }
     
-    console.log(`🔍 Fetching next game for team: ${teamAbbrev} using ESPN API`);
-    
     // Map team abbreviation to ESPN team ID
     const espnTeamId = getEspnTeamId(teamAbbrev);
     if (!espnTeamId) {
-      console.log(`⚠️ Could not find ESPN team ID for abbreviation: ${teamAbbrev}`);
       return null;
     }
-    
-    console.log(`✅ Found ESPN team ID: ${espnTeamId} for ${teamAbbrev}`);
     
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -760,11 +752,8 @@ export async function getNextGame(nbaPlayerId, teamAbbrev) {
         timeout: 10000
       });
       
-      console.log(`📥 ESPN schedule response status: ${scheduleResponse.status}`);
-      
       if (scheduleResponse.data && scheduleResponse.data.events) {
         const events = scheduleResponse.data.events || [];
-        console.log(`📅 Found ${events.length} games in ESPN schedule`);
         
         // Find next game (future game)
         for (const event of events) {
@@ -798,11 +787,23 @@ export async function getNextGame(nbaPlayerId, teamAbbrev) {
                   isHome = isHomeTeam;
                 } else {
                   // Map ESPN abbreviation back to standard NBA abbreviation
-                  opponent = mapEspnToNbaAbbrev(teamAbbrevFromEspn) || teamAbbrevFromEspn;
+                  let mappedOpponent = mapEspnToNbaAbbrev(teamAbbrevFromEspn) || teamAbbrevFromEspn;
+                  
+                  // Double-check: if mapped opponent is the same as player's team, skip this competitor
+                  // This handles cases where ESPN returns inconsistent abbreviations (e.g., SA vs SAS)
+                  const isSameTeam = mappedOpponent === teamAbbrev || 
+                                    (mappedOpponent === 'SA' && teamAbbrev === 'SAS') || 
+                                    (mappedOpponent === 'SAS' && teamAbbrev === 'SA');
+                  
+                  if (isSameTeam) {
+                    continue;
+                  }
+                  
+                  opponent = mappedOpponent;
                 }
               }
               
-              if (opponent) {
+              if (opponent && opponent !== teamAbbrev) {
                 // Format date
                 const formattedDate = gameDate.toLocaleDateString('en-US', { 
                   month: 'short', 
@@ -825,12 +826,15 @@ export async function getNextGame(nbaPlayerId, teamAbbrev) {
                   }
                 }
                 
-                console.log(`✅ Found next game via ESPN: ${teamAbbrev} vs ${opponent} on ${formattedDate}`);
+                // Get event ID for summary API
+                const eventId = event.id || null;
+                
                 return {
                   opponent: opponent,
                   date: formattedDate,
                   time: gameTime,
-                  isHome: isHome
+                  isHome: isHome,
+                  eventId: eventId // Add event ID for summary API
                 };
               }
             }
@@ -860,9 +864,10 @@ export async function getNextGame(nbaPlayerId, teamAbbrev) {
 function normalizeEspnAbbrev(abbrev) {
   if (!abbrev) return '';
   const upper = abbrev.toUpperCase();
-  // ESPN uses GS, UTAH, etc. - normalize to standard
+  // ESPN uses GS, UTAH, SA, etc. - normalize to standard
   if (upper === 'GS') return 'GSW';
   if (upper === 'UTAH') return 'UTA';
+  if (upper === 'SA') return 'SAS';  // ESPN uses SA for San Antonio Spurs
   return upper;
 }
 
@@ -874,7 +879,8 @@ function mapEspnToNbaAbbrev(espnAbbrev) {
   const upper = espnAbbrev.toUpperCase();
   const mapping = {
     'GS': 'GSW',
-    'UTAH': 'UTA'
+    'UTAH': 'UTA',
+    'SA': 'SAS'  // ESPN uses SA for San Antonio Spurs, normalize to SAS
   };
   return mapping[upper] || upper;
 }
@@ -964,7 +970,8 @@ function getEspnTeamId(abbrev) {
     'TOR': '28',     // Toronto Raptors
     'UTA': '26',     // Utah Jazz
     'UTAH': '26',    // Utah Jazz (ESPN abbreviation)
-    'WAS': '27'      // Washington Wizards
+    'WAS': '27',     // Washington Wizards
+    'WSH': '27'      // Washington Wizards (alternative abbreviation)
   };
   
   return teamMap[abbrev.toUpperCase()] || null;

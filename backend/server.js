@@ -3,8 +3,10 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import fs from 'fs';
 import { playerRoutes } from './routes/playerRoutes.js';
 import { searchRoutes } from './routes/searchRoutes.js';
+import { trendingRoutes } from './routes/trendingRoutes.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -19,8 +21,22 @@ const PORT = process.env.PORT || 5001;
 app.use(cors());
 app.use(express.json());
 
-// Serve static files (player images)
-app.use('/images', express.static(path.join(__dirname, 'public/images')));
+// Serve static files (player images and sportsbook logos)
+app.use('/images', express.static(path.join(__dirname, 'public/images'), {
+  setHeaders: (res, filePath) => {
+    // Set correct content-type for SVG files (even if they have .png extension)
+    if (filePath.endsWith('.png')) {
+      try {
+        const content = fs.readFileSync(filePath, 'utf8');
+        if (content.trim().startsWith('<svg')) {
+          res.setHeader('Content-Type', 'image/svg+xml');
+        }
+      } catch (e) {
+        // If we can't read it, let express handle it
+      }
+    }
+  }
+}));
 
 // Health check route
 app.get('/api/health', (req, res) => {
@@ -30,6 +46,7 @@ app.get('/api/health', (req, res) => {
 // API routes
 app.use('/api/player', playerRoutes);
 app.use('/api/search', searchRoutes);
+app.use('/api/trending', trendingRoutes);
 
 // Start server with error handling
 app.listen(PORT, () => {
